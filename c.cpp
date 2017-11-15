@@ -1,4 +1,5 @@
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Casting.h"
@@ -27,21 +28,44 @@ namespace {
     void InLoop(Loop *L, unsigned nest)
     {
       errs() << "Level(" << nest << ")\n";
-      BasicBlock *header = L->getHeader();
+      /*BasicBlock *header = L->getHeader();
       errs() << " Header Block: " << header->getName() << "\n";
       BasicBlock::iterator h_iter;
       for ( h_iter = header->begin(); h_iter != header->end(); ++h_iter)
 	{
-	  if (CmpInst *cmpInst = dyn_cast<CmpInst>(&*h_iter))
+	  /*if (CmpInst *cmpInst = dyn_cast<CmpInst>(&*h_iter))
 	    {
-	      ///errs() << "opcodename: " << cmpInst->getOpcodeName() << "\n";
-	      //errs() << "predicate: " << cmpInst->getPredicate() << "\n";
 	      h_iter->print(errs());
 	      errs() << "\n";
 	      InBranch(cmpInst);
-	      //PrintX(cmpInst);
+	      }
+	  h_iter->print(errs());
+	  errs() << '\n';
+	  for (int i = 0; i < h_iter->getNumOperands(); i++)
+	    errs() << std::addressof(*h_iter->getOperand(i)) << " ";
+	  errs() << '\n';
+	}*/
+
+      for ( auto bb : L->getBlocks() )
+	{
+	  errs() << " Block Name: " << bb->getName() << "\n";
+	  BasicBlock::iterator h_iter;
+	  for ( h_iter = bb->begin(); h_iter != bb->end(); ++h_iter)
+	    {
+	      h_iter->print(errs());
+	      errs() <<"\t\t\t";// '\n';
+	      //if (LoadInst *LI = dyn_cast<LoadInst>(h_iter))
+		errs() << std::addressof(*h_iter) << "; ";//(uint32_t)(LI->getSyncScopeID()) << "; ";
+	      for (int i = 0; i < h_iter->getNumOperands(); i++)
+		{
+		  //if (auto *v = dyn_cast<MetadataAsValue>(h_iter->getOperand(i)))
+		  if (h_iter->getOperand(i)->hasName())
+		    errs() << "("<< h_iter->getOperand(i)->getName() <<")";
+		errs() << std::addressof(*h_iter->getOperand(i)) << " ";
+		}
+	      errs() << '\n';
 	    }
-	  //h_iter->print(errs());
+	  errs() << '\n';
 	}
       
       std::vector<Loop *> subLoops = L->getSubLoops();
@@ -51,37 +75,14 @@ namespace {
     }
     void InBranch(CmpInst *cmpInst)
     {
-      /*
-      switch(cmpInst->getPredicate())
-	{
-	  
-	case CmpInst::ICMP_SGT: // Set on Greater Than
-	case CmpInst::ICMP_SLT: // Branch on Lower Than
-	  break;
-	}*/
-      /*errs() << cmpInst->getNumOperands()  << cmpInst->getOperand(0)->getName() <<
-	" " << cmpInst->getOperand(1)->getName() << "\n";*/
       errs() << "  Value 1: ";
       PrintValue(cmpInst->getOperand(0));
-      //errs() << " ";
       errs() << "  Value 2: ";
       PrintValue(cmpInst->getOperand(1));
       errs() << "  Predicate: " << cmpInst->getPredicate() << "\n";
-      
-      //errs() << "\n";
     }
     void PrintValue(Value *v)
     {
-      /*if (ConstantInt *CI = dyn_cast<ConstantInt>(&*v))
-	{
-	  //errs() << CI->getSExtValue() << "\n";
-	  }*/
-      
-      /*if (LoadInst *Inst = dyn_cast<LoadInst>(&*v))
-	    {
-	      errs() << "Load Inst !!" << "\n";
-	      }*/
-      //errs() << "  v-n: " << v->getValueName()->first() << "\n";
       v->dump();
     }
     void PrintX(CmpInst *ci)
