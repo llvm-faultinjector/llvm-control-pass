@@ -16,7 +16,7 @@ namespace {
     }
     LoopCheck() : FunctionPass(ID) {}
     bool runOnFunction(Function &F) override {
-      LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();\
+      LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
       //getAnalysis<LoopInfoWrapperPass>().print(errs());
       errs() << "\n";
       errs() << "Function " << F.getName() +"\n";
@@ -48,22 +48,42 @@ namespace {
 
       for ( auto bb : L->getBlocks() )
 	{
+	  std::vector<std::string> strs;
+	  std::vector<Value *> values;
 	  errs() << " Block Name: " << bb->getName() << "\n";
 	  BasicBlock::iterator h_iter;
 	  for ( h_iter = bb->begin(); h_iter != bb->end(); ++h_iter)
 	    {
-	      h_iter->print(errs());
-	      errs() <<"\t\t\t";// '\n';
+	      //h_iter->print(errs());
+	      //errs() <<"\t\t\t";// '\n';
 	      //if (LoadInst *LI = dyn_cast<LoadInst>(h_iter))
-		errs() << std::addressof(*h_iter) << "; ";//(uint32_t)(LI->getSyncScopeID()) << "; ";
+	      //errs() << std::addressof(*h_iter) << "; ";//(uint32_t)(LI->getSyncScopeID()) << "; ";
+		if (LoadInst *LI = dyn_cast<LoadInst>(h_iter))
+		  {
+		    h_iter->print(errs());
+		    errs() << '\n';
+		    strs.push_back(h_iter->getOperand(0)->getName());
+		    // push address of load instruction, not operand of load instruction
+		    values.push_back(LI);
+		  }
+		else
+		  {
+		    for (int i = 0; i < h_iter->getNumOperands(); i++)
+		      for (int j = 0; j < values.size(); j++)
+			if ( values[j] == h_iter->getOperand(i) )
+			  {
+			  h_iter->print(errs());
+			  errs() << "(" << strs[j] << ")\n";
+			  }
+		  }
 	      for (int i = 0; i < h_iter->getNumOperands(); i++)
 		{
 		  //if (auto *v = dyn_cast<MetadataAsValue>(h_iter->getOperand(i)))
-		  if (h_iter->getOperand(i)->hasName())
-		    errs() << "("<< h_iter->getOperand(i)->getName() <<")";
-		errs() << std::addressof(*h_iter->getOperand(i)) << " ";
+		  //if (h_iter->getOperand(i)->hasName())
+		  //errs() << "("<< h_iter->getOperand(i)->getName() <<")";
+		  //errs() << std::addressof(*h_iter->getOperand(i)) << " ";
 		}
-	      errs() << '\n';
+	      //errs() << '\n';
 	    }
 	  errs() << '\n';
 	}
