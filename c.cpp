@@ -22,6 +22,8 @@ namespace {
       errs() << "Function " << F.getName() +"\n";
       for (Loop *L :*LI)
         InLoop(L, 0);
+      //auto& argList = F.getArgumentList();
+      //errs() << " ArgSize : " << F.arg_size() + "\n";
       errs() << "\n";
       return false;
     }
@@ -68,13 +70,17 @@ namespace {
 		  }
 		else
 		  {
-		    for (int i = 0; i < h_iter->getNumOperands(); i++)
-		      for (int j = 0; j < values.size(); j++)
-			if ( values[j] == h_iter->getOperand(i) )
+		    for (int i = 0; i < h_iter->getNumOperands(); i++){
+		      //for (int j = 0; j < values.size(); j++){
+			/*if ( values[j] == h_iter->getOperand(i) )
 			  {
 			  h_iter->print(errs());
 			  errs() << "(" << strs[j] << ")\n";
-			  }
+			  }*/
+			h_iter->print(errs());
+		        errs() << "(" << h_iter->getOperand(i)->getName() << ")\n";
+		      }
+		    
 		  }
 	      for (int i = 0; i < h_iter->getNumOperands(); i++)
 		{
