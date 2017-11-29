@@ -1,0 +1,29 @@
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include <vector>
+
+using namespace llvm;
+
+namespace {
+  struct LoopCheck : public FunctionPass {
+    static char ID;
+    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+      AU.addRequired<LoopInfoWrapperPass>();
+    }
+    LoopCheck() : FunctionPass(ID) {}
+    bool runOnFunction(Function &F) override {
+      LoopInfo *LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+      errs() << "\n";
+      errs() << "Function " << F.getName() +"\n";
+      errs() << "\n";
+      return false;
+    }
+  };
+}
+
+char LoopCheck::ID = 0;
+static RegisterPass<LoopCheck> X("loopcheck", "Hello World Pass");
