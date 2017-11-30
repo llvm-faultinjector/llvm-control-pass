@@ -6,75 +6,103 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include <vector>
+#include <map>
 
 using namespace llvm;
 
 namespace {
-  struct LoopCheck : public FunctionPass {
-    static char ID;
-    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-      AU.addRequired<LoopInfoWrapperPass>();
-    }
-    LoopCheck() : FunctionPass(ID) {}
-    bool runOnFunction(Function &F) override {
-      errs() << "\n";
-      errs() << "Function " << F.getName() +"\n";
-	  std::vector<Value *> v = findAnnotation(F);
-	  for (auto s : v)
-		findDependency(s, F);//errs() << "  " << s->getName() << "\n";
-      errs() << "\n";
-      return false;
-    }
+	struct LoopCheck : public FunctionPass {
+	static char ID;
+	std::vector<Instruction *> dependency;
+	std::map<Value *, std::vector<Instruction *>> dependency_map;
+	LoopCheck()
+		 : FunctionPass(ID) 
+	{
+	}
+	bool runOnFunction(Function &F) override 
+	{
+		errs() << "\n";
+		errs() << "Function " << F.getName() +"\n";
+		std::vector<Value *> v = findAnnotation(F);
+		for (auto s : v)
+			findDependency(s, F);
+		errs() << "\n";
+		return false;
+	}
 	std::vector<Value *> findAnnotation(Function &F)
 	{
 		std::vector<Value *> annotate;
-		for ( auto& k : F.getEntryBlock() )
+		for ( auto& bb : F )
 		{
-			if ( CallInst *c = dyn_cast<CallInst> (&k) )
+			for ( auto& k : bb)
 			{
-				Function *cf = c->getCalledFunction();
-				if ( cf->getName() == "llvm.var.annotation")
+				if ( CallInst *c = dyn_cast<CallInst> (&k) )
 				{
-					annotate.push_back((cast<BitCastInst>(c->getArgOperand(0)))->getOperand(0));
+					Function *cf = c->getCalledFunction();
+					if ( cf->getName() == "llvm.var.annotation")
+					{
+						annotate.push_back((cast<BitCastInst>(c->getArgOperand(0)))->getOperand(0));
+
+						// llvm annotatino string metadata를 추출하는 루틴 , 아직 구현하지 못함						//errs() << (cast<ConstantDataArray>(cast<ConstantDataArray>(cast<GlobalVariable>(cast<GetElementPtrInst>(c->getArgOperand(1))))->getOperand(0)))->getAsString();
+						c->getArgOperand(1)->getType()->print(errs());
+						if (ConstantDataArray *gv = dyn_cast<ConstantDataArray>(c->getArgOperand(1)))
+							errs() << "asdfasdf";
+					}
 				}
 			}
 		}
 		return annotate;
 	}
-	std::vector<Instruction *> findDependency(Value *V, Function &F)
+	void findDependency(Value *V, Function &F)
 	{
 		errs() << " -Find dependency value : " << V->getName() << "\n";
 
 		errs() << "   * store\n";
-		std::vector<Instruction *> insts;
-		std::vector<Value *> step1;
+		std::vector<Value *> step;
 		for ( auto& bb : F )
+		{
 			for ( auto& i : bb )
 			{
 				if (StoreInst* si = dyn_cast<StoreInst> (&i))
+				{
 					if (si->getPointerOperand() == V)
 					{
 						errs() << "     - " << bb.getName() << "\n      - ";
 						i.print(errs());
 						errs() << "\n";
-						step1.push_back(si->getValueOperand());
+						step.push_back(si->getValueOperand());
 					}
+				}
 			}
-
+		}
 		errs() << "\n   * follow nodes\n";
-		for ( auto& v : step1 )
+		for ( auto& v : step )
 			printFollowNodes(v);
-		return insts;
+		errs() << "\n";
+		dependency_map.insert(std::pair<Value *, std::vector<Instruction *>>(V, dependency));
+		dependency.clear();
 	}
 	void printFollowNodes(Value *X)
 	{
 		if (Instruction *inst = dyn_cast<Instruction> (X))
 		{
+			// check if exist already
+			for (auto& v : dependency)
+				if ( v == inst ) return;
+			dependency.push_back(inst);
 			errs() << "     - ";
 			inst->print(errs());
 			errs() << "\n";
-			for (int i = 0; i < inst->getNumOperands(); i++)
-				printFollowNodes(inst->getOperand(i));
+			if ( PHINode *phi = dyn_cast<PHINode> (inst) )
+			{
+				for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
+					printFollowNodes(phi->getIncomingValue(i));
+			}
+			else
+			{			
+				for (unsigned i = 0; i < inst->getNumOperands(); i++)
+					printFollowNodes(inst->getOperand(i));
+			}
 		}
 	}
 
