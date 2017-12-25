@@ -29,6 +29,11 @@ namespace {
 		errs() << "\n";
 		return false;
 	}
+	StringRef getAnnotationString(CallInst *c)
+	{
+		Constant *cs = (cast<GlobalVariable>((cast<ConstantExpr>(c->getArgOperand(1)))->getOperand(0)))->getInitializer();
+		return cast<ConstantDataArray>(cs)->getAsCString();
+	}
 	std::vector<Value *> findAnnotation(Function &F)
 	{
 		std::vector<Value *> annotate;
@@ -42,20 +47,9 @@ namespace {
 					if ( cf->getName() == "llvm.var.annotation")
 					{
 						annotate.push_back((cast<BitCastInst>(c->getArgOperand(0)))->getOperand(0));
-
-						// llvm annotatino string metadata를 추출하는 루틴 , 아직 구현하지 못함						
-						//errs() << (cast<ConstantDataArray>(cast<ConstantDataArray>(cast<GlobalVariable>(cast<GetElementPtrInst>(c->getArgOperand(1))))->getOperand(0)))->getAsString();
 						
-						Constant *cs = (cast<GlobalVariable>((cast<ConstantExpr>(c->getArgOperand(1)))->getOperand(0)))->getInitializer();
-						errs() << cast<ConstantDataArray>(cs)->getAsCString();
-						//cs->getType()->print(errs());
-						
-						//if (isa<MetadataAsValue>(dm))
-						//    errs() << "asdfasdf";
-						
-						//c->getArgOperand(1)->getType()->print(errs());
-						//if (IntegerType *it = dyn_cast<IntegerType>(c->getArgOperand(1)))
-						//	errs() << "asdfasdf";
+						if (getAnnotationString(c) == "xxx")
+						    errs() << "xxx is detected!\n";
 					}
 				}
 			}
