@@ -11,11 +11,11 @@
 using namespace llvm;
 
 namespace {
-	struct LoopCheck : public FunctionPass {
+	struct CustomPass : public FunctionPass {
 	static char ID;
 	std::vector<Instruction *> dependency;
 	std::map<Value *, std::vector<Instruction *>> dependency_map;
-	LoopCheck()
+	CustomPass()
 		 : FunctionPass(ID) 
 	{
 	}
@@ -43,10 +43,19 @@ namespace {
 					{
 						annotate.push_back((cast<BitCastInst>(c->getArgOperand(0)))->getOperand(0));
 
-						// llvm annotatino string metadata를 추출하는 루틴 , 아직 구현하지 못함						//errs() << (cast<ConstantDataArray>(cast<ConstantDataArray>(cast<GlobalVariable>(cast<GetElementPtrInst>(c->getArgOperand(1))))->getOperand(0)))->getAsString();
-						c->getArgOperand(1)->getType()->print(errs());
-						if (ConstantDataArray *gv = dyn_cast<ConstantDataArray>(c->getArgOperand(1)))
-							errs() << "asdfasdf";
+						// llvm annotatino string metadata를 추출하는 루틴 , 아직 구현하지 못함						
+						//errs() << (cast<ConstantDataArray>(cast<ConstantDataArray>(cast<GlobalVariable>(cast<GetElementPtrInst>(c->getArgOperand(1))))->getOperand(0)))->getAsString();
+						
+						Constant *cs = (cast<GlobalVariable>((cast<ConstantExpr>(c->getArgOperand(1)))->getOperand(0)))->getInitializer();
+						errs() << cast<ConstantDataArray>(cs)->getAsCString();
+						//cs->getType()->print(errs());
+						
+						//if (isa<MetadataAsValue>(dm))
+						//    errs() << "asdfasdf";
+						
+						//c->getArgOperand(1)->getType()->print(errs());
+						//if (IntegerType *it = dyn_cast<IntegerType>(c->getArgOperand(1)))
+						//	errs() << "asdfasdf";
 					}
 				}
 			}
@@ -109,5 +118,5 @@ namespace {
   };
 }
 
-char LoopCheck::ID = 0;
-static RegisterPass<LoopCheck> X("loopcheck", "Hello World Pass");
+char CustomPass::ID = 0;
+static RegisterPass<CustomPass> X("custom", "Hello World Pass");
