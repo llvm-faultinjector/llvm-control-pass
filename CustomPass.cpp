@@ -29,7 +29,7 @@ namespace {
 		errs() << "\n";
 		return false;
 	}
-	StringRef getAnnotationString(CallInst *c)
+	StringRef getAnnotatedString(CallInst *c)
 	{
 		Constant *cs = (cast<GlobalVariable>((cast<ConstantExpr>(c->getArgOperand(1)))->getOperand(0)))->getInitializer();
 		return cast<ConstantDataArray>(cs)->getAsCString();
@@ -46,19 +46,21 @@ namespace {
 					Function *cf = c->getCalledFunction();
 					if ( cf->getName() == "llvm.var.annotation")
 					{
-						annotate.push_back((cast<BitCastInst>(c->getArgOperand(0)))->getOperand(0));
+						Value *v = (cast<BitCastInst>(c->getArgOperand(0)))->getOperand(0);
+						annotate.push_back(v);
 						
-						if (getAnnotationString(c) == "xxx")
-						    errs() << "xxx is detected!\n";
+						errs() << " - Detected annotated string : " << getAnnotatedString(c) << "("
+							<< v->getName() << ")" << "\n";
 					}
 				}
 			}
 		}
+		errs() << "\n";
 		return annotate;
 	}
 	void findDependency(Value *V, Function &F)
 	{
-		errs() << " -Find dependency value : " << V->getName() << "\n";
+		errs() << " - Dependent value : " << V->getName() << "\n";
 
 		errs() << "   * store\n";
 		std::vector<Value *> step;
