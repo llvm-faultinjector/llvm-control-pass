@@ -176,6 +176,85 @@ namespace {
     FunctionDependency* getDependency(Function *F) { return function_map[F]; }
     void addDependency(Function *F, FunctionDependency *FD) { function_map[F] = FD; }
   };
+  
+  ///---------------------------------------------------------
+  ///
+  ///          Branch Map
+  ///
+  ///---------------------------------------------------------
+
+  class BlockNode
+  {
+    BasicBlock *basic_block;
+    SmallVector<BlockNode *, 4> from_node;
+    SmallVector<BlockNode *, 4> to_node;
+
+  public:
+
+    BlockNode(BasicBlock *BB) : basic_block(BB) { }
+    
+    void addFromNode(BlockNode *BN) { from_node.push_back(BN); }
+    SmallVector<BlockNode *, 4>& getFromNodes() { return from_node; }
+    void addToNode(BlockNode *BN) { to_node.push_back(BN); }
+    SmallVector<BlockNode *, 4>& getToNodes() { return to_node; }
+
+    BasicBlock *getBasicBlock() { return basic_block; }
+  };
+
+  class BranchManager
+  {
+    Function *function;
+    BlockNode *start;
+    std::vector<BlockNode *> nodes;
+
+  public:
+
+    BranchManager(Function *F) : function(F) 
+    {
+      start = createNode(&F->getEntryBlock());
+      nodes.push_back(start);
+      if (BranchInst *bi = dyn_cast<BranchInst> (&start->getBasicBlock()->back()))
+      {
+        for (size_t i = 0; i < bi->getNumSuccessors(); i++)
+        {
+          start->addToNode(run(bi->getSuccessor(i), start));
+        }
+      }
+    }
+
+    BlockNode *getNodeFromInstruction(Instruction *inst)
+    {
+      for (BlockNode *bn : nodes)
+        for (Instruction& i : *bn->getBasicBlock())
+          if (&i == inst)
+            return bn;
+      return nullptr;
+    }
+
+  private:
+
+    BlockNode *createNode(BasicBlock *BB)
+    {
+      return new BlockNode(BB);
+    }
+
+    BlockNode *run(BasicBlock *BB, BlockNode *P)
+    {
+      BlockNode *node = createNode(BB);
+      node->addFromNode(P);
+      nodes.push_back(node);
+      Instruction *last = &BB->back();
+      if (BranchInst *bi = dyn_cast<BranchInst> (last))
+      {
+        for (size_t i = 0; i < bi->getNumSuccessors(); i++)
+        {
+          node->addToNode(run(bi->getSuccessor(i), node));
+        }
+      }
+      return node;
+    }
+
+  };
 
   ///---------------------------------------------------------
   ///
@@ -196,6 +275,10 @@ namespace {
 
       /// 어떤 함수인자가 특정 함수인자에 미치는 영향을 검사합니다.
       FunctionArgumentDependencyCheck argument_checker(FD, DM);
+
+      /// 이 함수는 실험적입니다.
+      /// 이 함수는 단독으로 사용되어선 안됩니다.
+      FunctionMaybeDependencyChecker maybe_checker(FD, DM);
     }
 
     class FunctionReturnDependencyChecker
@@ -474,11 +557,22 @@ namespace {
       }
 
     };
-    
+
     class FunctionMaybeDependencyChecker
     {
+      Function *function;
+      DependencyMap *dependency_map;
+      FunctionDependency *function_dependency;
+
+    public:
+
+      FunctionMaybeDependencyChecker(FunctionDependency *FD, DependencyMap *DM)
+        : function_dependency(FD), dependency_map(DM)
+      {
+      }
 
     };
+    
   };
   
   /// This class must be called only once by each target-function.
@@ -589,7 +683,7 @@ namespace {
           }
         }
     }
-
+    
   };
 
   class DependencyManager
