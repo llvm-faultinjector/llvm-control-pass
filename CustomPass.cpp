@@ -4,7 +4,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-//  Copyright (C) 2017. rollrat. All Rights Reserved.
+//  Copyright (C) 2017-2018. rollrat. All Rights Reserved.
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,6 +16,8 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/ADT/SmallVector.h"
+
+#define IDC_PRINT_INSTRUCTION 0
 
 using namespace llvm;
 
@@ -181,6 +183,8 @@ namespace {
   ///
   ///---------------------------------------------------------
   
+  static DependencyMap *recursion_map;
+
   class DependencyChecker
   {
   public:
@@ -207,6 +211,7 @@ namespace {
         : function_dependency(FD), dependency_map(DM)
       {
         function = function_dependency->getFunction();
+        recursion_map->addDependency(function, nullptr);
 
         for (BasicBlock& basic_block : *function)
           for (Instruction& inst : basic_block)
@@ -238,6 +243,10 @@ namespace {
           if (inst_dependency->hasInstructoin(inst))
             return;
 
+#if IDC_PRINT_INSTRUCTION
+          errs() << "    (" << function->getName() << ")" << *inst << "\n";
+#endif
+
           inst_dependency->addInstruction(inst);
 
           // PHINode와 기타 Instruction은 Operand에 접근하는 방법이 다릅니다.
@@ -250,10 +259,10 @@ namespace {
               runSearch(target_value);
             }
           } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
-
+            
             // 어떤 함수인자가 반환값에 영향을 미칩니까?
-            FunctionDependency *depends = processCallInst(ci);
-            size_t count = depends->getFunctionDependencyNum() - 1;
+            FunctionDependency *depends;
+            if (!(depends = processCallInst(ci))) return;
 
             // 반환값에 영향을 미치는 모든 함수인자들은 V에 영향을 미치게 됩니다.
             for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
@@ -263,6 +272,7 @@ namespace {
               }
 
           } else {
+
             for (unsigned i = 0; i < inst->getNumOperands(); i++) {
               Value *target_value = inst->getOperand(i);
               runBottomUp(target_value);
@@ -288,6 +298,8 @@ namespace {
         if (dependency_map->hasDependency(target_function)) {
           depends = dependency_map->getDependency(target_function);
         } else {
+          if (recursion_map->hasDependency(target_function))
+            return nullptr;
           depends = new FunctionDependency(target_function);
           run(depends, dependency_map);
           dependency_map->addDependency(target_function, depends);
@@ -328,7 +340,8 @@ namespace {
             }
             else if (CallInst *ci = dyn_cast<CallInst> (&inst))
             {
-              FunctionDependency *depends = processCallInst(ci);
+              FunctionDependency *depends;
+              if (!(depends = processCallInst(ci))) continue;
               for (size_t i = 0; i < depends->getFunction()->arg_size(); i++)
                 if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
                   for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
@@ -353,6 +366,7 @@ namespace {
         : function_dependency(FD), dependency_map(DM)
       {
         function = function_dependency->getFunction();
+        recursion_map->addDependency(function, nullptr);
 
         for (Argument *arg = function->arg_begin(); arg != function->arg_end(); arg++)
           if (arg->getType()->isPointerTy())
@@ -373,6 +387,8 @@ namespace {
         if (dependency_map->hasDependency(target_function)) {
           depends = dependency_map->getDependency(target_function);
         } else {
+          if (recursion_map->hasDependency(target_function))
+            return nullptr;
           depends = new FunctionDependency(target_function);
           run(depends, dependency_map);
           dependency_map->addDependency(target_function, depends);
@@ -396,6 +412,10 @@ namespace {
             A->getArgNo())->setArgumentDependency(arg->getArgNo());
           return;
         }
+        
+#if IDC_PRINT_INSTRUCTION
+          errs() << "    (" << function->getName() << ")" << *V << "\n";
+#endif
 
         // 이 함수는 무한재귀 성질을 가지므로 중복검사를 시행합니다.
         if (std::find(overlap.begin(), overlap.end(), V) != overlap.end())
@@ -419,7 +439,8 @@ namespace {
             }
             else if (CallInst *ci = dyn_cast<CallInst> (&inst))
             {
-              FunctionDependency *depends = processCallInst(ci);
+              FunctionDependency *depends;
+              if (!(depends = processCallInst(ci))) continue;
               for (size_t i = 0; i < depends->getFunction()->arg_size(); i++)
                 if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
                   for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
@@ -437,7 +458,8 @@ namespace {
               runChecker(A, target_value);
             }
           } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
-            FunctionDependency *depends = processCallInst(ci);
+            FunctionDependency *depends;
+            if (!(depends = processCallInst(ci))) return;
             for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
               if (depends->hasReturnDependency(i) == true) {
                 runChecker(A, ci->getOperand(i));
@@ -476,7 +498,7 @@ namespace {
       for (Value *value : V)
       {
         inst_dependency = new InstructionDependency();
-        runBottomUp(value);
+        runSearch(value);
         IDM->addDependency(value, inst_dependency);
         inst_dependency = nullptr;
       }
@@ -490,6 +512,10 @@ namespace {
       {
         if (inst_dependency->hasInstructoin(inst))
           return;
+        
+#if IDC_PRINT_INSTRUCTION
+          errs() << "    (" << function->getName() << ")" << *inst << "\n";
+#endif
 
         inst_dependency->addInstruction(inst);
 
@@ -523,7 +549,6 @@ namespace {
       
       if (dependency_map->hasDependency(target_function)) {
         depends = dependency_map->getDependency(target_function);
-        errs() << depends->getFunction()->getName() << "\n";
       } else {
         depends = new FunctionDependency(target_function);
         DependencyChecker::run(depends, dependency_map);
@@ -578,6 +603,7 @@ namespace {
     DependencyMap *annotated_map;
     Function *target_function;
     AnnotatedVector annotated_value;
+    SmallVector<Value *, 16> annotated_target;
 
   public:
 
@@ -592,15 +618,9 @@ namespace {
       FunctionDependency *fd = new FunctionDependency(target_function);
       InstructionDependencyMap *idm = new InstructionDependencyMap();
 
-      SmallVector<Value *, 16> annotated_stores;
-
-      for (BasicBlock& basic_block : *target_function)
-        for (Instruction& inst : basic_block)
-          if (StoreInst *si = dyn_cast<StoreInst> (&inst))
-            if (isAnnotated(si->getPointerOperand()))
-              annotated_stores.push_back(si->getValueOperand());
-
-      BottomUpDependencyChecker checker(target_function, annotated_stores, map, fd, idm);
+      recursion_map = new DependencyMap();
+      BottomUpDependencyChecker checker(target_function, annotated_target, map, fd, idm);
+      delete recursion_map;
       
       fd->setInstructionDependencyMap(idm);
       annotated_map->addDependency(target_function, fd);
@@ -637,9 +657,11 @@ namespace {
       for (BasicBlock& basic_block : *target_function)
         for (Instruction& inst : basic_block)
           if (CallInst *ci = dyn_cast<CallInst> (&inst))
-            if (ci->getCalledFunction()->getName() == llvm_annotate_variable)
+            if (ci->getCalledFunction()->getName() == llvm_annotate_variable) {
               annotated_value.push_back(AnnotatedTuple((
                 cast<BitCastInst>(ci->getArgOperand(0)))->getOperand(0), ci));
+              annotated_target.push_back((cast<BitCastInst>(ci->getArgOperand(0)))->getOperand(0));
+            }
     }
 
   };
@@ -686,7 +708,7 @@ namespace {
       if (vec.size() == 0)
       {
         out() << "Annotated Variable is not found.\n\n";
-        increaseTab();
+        decreaseTab();
         return;
       }
       out() << "Annotated Variable List :\n";
@@ -730,7 +752,7 @@ namespace {
     }
     void decreaseTab()
     {
-      tab.erase(0, 3);
+      tab.erase(0, 4);
     }
 
     raw_ostream& out()
