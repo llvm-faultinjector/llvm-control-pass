@@ -1,3 +1,13 @@
+//===----------------------------------------------------------------------===//
+//
+//                   Interprocedural Dependency Checker
+//
+//===----------------------------------------------------------------------===//
+//
+//  Copyright (C) 2017. rollrat. All Rights Reserved.
+//
+//===----------------------------------------------------------------------===//
+
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Constants.h"
@@ -5,439 +15,779 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include <vector>
-#include <map>
-#include <tuple>
+#include "llvm/ADT/SmallVector.h"
 
 using namespace llvm;
 
+/*
+  The same name function have the same algorithm.
+*/
+
 namespace {
 
-  class DependencyManager
+  static const char *llvm_annotate_variable = "llvm.var.annotation";
+  
+  ///---------------------------------------------------------
+  ///
+  ///                    Pass Tools
+  ///
+  ///---------------------------------------------------------
+
+  class InstructionDependency
   {
-    Function *function;
-    std::vector<Value *> values;
-    std::vector<Instruction *> dependency;
-    std::map<Value *, std::vector<Instruction *>> dependency_map;
+    using InstsType = std::vector<Instruction *>;
+    std::vector<Instruction *> insts;
 
   public:
 
-    DependencyManager(Function *func, std::vector<Value *>& val)
-      : function(func), values(val)
+    bool hasInstructoin(Instruction *I)
+    { return std::find(insts.begin(), insts.end(), I) != insts.end(); }
+    void addInstruction(Instruction *I) { insts.push_back(I); }
+
+    InstsType::iterator begin() { return insts.begin(); }
+    InstsType::const_iterator begin() const { return insts.begin(); }
+    InstsType::iterator end() { return insts.end(); }
+    InstsType::const_iterator end() const { return insts.end(); }
+  };
+  
+  class InstructionDependencyMap
+  {
+    using ValueMap = std::map<Value *, InstructionDependency *>;
+    ValueMap value_map;
+
+  public:
+
+    InstructionDependencyMap() : value_map() { }
+    ~InstructionDependencyMap() { for (auto& id : value_map) delete id.second; }
+    bool hasDependency(Value *V) { return value_map.find(V) != value_map.end(); }
+    InstructionDependency* getDependency(Value *V) { return value_map[V]; }
+    void addDependency(Value *V, InstructionDependency *ID) { value_map[V] = ID; }
+
+    ValueMap::iterator begin() { return value_map.begin(); }
+    ValueMap::const_iterator begin() const { return value_map.begin(); }
+    ValueMap::iterator end() { return value_map.end(); }
+    ValueMap::const_iterator end() const { return value_map.end(); }
+  };
+
+  class ArgumentInstructionDependencyMap
+  {
+    using IndexMap = std::map<int, InstructionDependency *>;
+    IndexMap index_map;
+
+  public:
+
+    ArgumentInstructionDependencyMap() : index_map() { }
+    bool hasDependency(int ArgNo) { return index_map.find(ArgNo) != index_map.end(); }
+    InstructionDependency* getDependency(int ArgNo) { return index_map[ArgNo]; }
+    void addDependency(int ArgNo, InstructionDependency *ID) { index_map[ArgNo] = ID; }
+
+    IndexMap::iterator begin() { return index_map.begin(); }
+    IndexMap::const_iterator begin() const { return index_map.begin(); }
+    IndexMap::iterator end() { return index_map.end(); }
+    IndexMap::const_iterator end() const { return index_map.end(); }
+  };
+
+  class FunctionArgumentDependency
+  {
+    Argument *argument;
+    std::vector<bool> argument_dependency;
+
+  public:
+
+    FunctionArgumentDependency(Argument *A, size_t argc)
+      : argument(A), argument_dependency(argc) { }
+    Argument* getArgument() { return argument; }
+    bool hasArgumentDependency(int ix) { return argument_dependency[ix]; }
+    void setArgumentDependency(int ix) { argument_dependency[ix] = true; }
+  };
+  
+  /// 이 클래스는 다음과 같은 세 가지 정보를 가지고 있습니다.
+  /// 1. 함수인자가 반환값에 미치는 영향
+  /// 2. 함수인자가 어떤 함수인자에 미치는 영향
+  /// 3. 위 두가지 중 한 개 이상의 경우에서 영향을 미치는
+  ///    호출되는 함수들의 목록
+  class FunctionDependency
+  {
+    Function *function;
+    std::vector<bool> return_dependency;
+    SmallVector<FunctionArgumentDependency *, 8> arg_dependency;
+    SmallVector<FunctionDependency *, 8> call_dependency;
+    InstructionDependencyMap *insts_map = nullptr;
+    InstructionDependency *return_instruction_dependency = nullptr;
+    ArgumentInstructionDependencyMap *arg_map = nullptr;
+
+  public:
+
+    FunctionDependency(Function *F) 
+      : function (F), return_dependency(F->arg_size()), arg_dependency(F->arg_size()) 
     {
+      for (size_t i = 0; i < F->arg_size(); i++)
+      {
+        Argument *arg = F->arg_begin() + i;
+        arg_dependency[i] = new FunctionArgumentDependency(arg, F->arg_size());
+      }
     }
 
-    const std::map<Value *, std::vector<Instruction *>>& findDependency()
+    ~FunctionDependency()
     {
-      dependency_map.clear();
+      if (insts_map) delete insts_map;
+      if (return_instruction_dependency) delete return_instruction_dependency;
+      if (arg_map) delete arg_map;
+    }
 
-      for (auto value : values)
-        instDependency(function, value);
+    Function* getFunction() { return function; }
 
-      return dependency_map;
+    /// 반환값에 영향을 미치는 함수인자를 알아볼 수 있습니다.
+    bool hasReturnDependency(int ix) { return return_dependency[ix]; }
+    void setReturnDependency(int ix) { return_dependency[ix] = true; }
+
+    /// 어떤 함수인자가 특정 함수인자에 영향을 미치는지 알아볼 수 있습니다.
+    FunctionArgumentDependency *getFunctionArgumentDependency(size_t i) { return arg_dependency[i]; }
+
+    void addFunctionDependency(FunctionDependency *FD) { call_dependency.push_back(FD); }
+    size_t getFunctionDependencyNum() { return call_dependency.size(); }
+    FunctionDependency* getFunctionDependency(size_t i) { return call_dependency[i]; }
+
+    /// annotated variables instruction dependency
+    void setInstructionDependencyMap(InstructionDependencyMap *IDM) { insts_map = IDM; }
+    InstructionDependencyMap *getInstrctionDependencyMap() { return insts_map; }
+
+    /// return instruction dependency
+    void setReturnInstructionDependency(InstructionDependency *ID) { return_instruction_dependency = ID; }
+    InstructionDependency *getReturnInstructionDependency() { return return_instruction_dependency; }
+
+    /// argument instruction dependency
+    void setArgumentInstructionDependencyMap(ArgumentInstructionDependencyMap *AIDM) { arg_map = AIDM; }
+    ArgumentInstructionDependencyMap *getArgumentInstructionDependencyMap() { return arg_map; }
+  };
+  
+  class DependencyMap
+  {
+    using FunctionMap = std::map<Function *, FunctionDependency *>;
+    FunctionMap function_map;
+
+  public:
+
+    DependencyMap() : function_map() { }
+    ~DependencyMap() { for (auto& fd : function_map) delete fd.second; }
+    bool hasDependency(Function *F) { return function_map.find(F) != function_map.end(); }
+    FunctionDependency* getDependency(Function *F) { return function_map[F]; }
+    void addDependency(Function *F, FunctionDependency *FD) { function_map[F] = FD; }
+  };
+
+  ///---------------------------------------------------------
+  ///
+  ///          Dependency Check Routine
+  ///
+  ///---------------------------------------------------------
+  
+  class DependencyChecker
+  {
+  public:
+
+    static void run(FunctionDependency *FD, DependencyMap *DM)
+    {
+      /// 어떤 함수인자가 반환값에 영향을 미치는지 검사합니다.
+      FunctionReturnDependencyChecker return_checker(FD, DM);
+
+      /// 어떤 함수인자가 특정 함수인자에 미치는 영향을 검사합니다.
+      FunctionArgumentDependencyCheck argument_checker(FD, DM);
+    }
+
+    class FunctionReturnDependencyChecker
+    {
+      Function *function;
+      DependencyMap *dependency_map;
+      FunctionDependency *function_dependency;
+      InstructionDependency *inst_dependency; // used only checking overlapping
+
+    public:
+
+      FunctionReturnDependencyChecker(FunctionDependency *FD, DependencyMap *DM)
+        : function_dependency(FD), dependency_map(DM)
+      {
+        function = function_dependency->getFunction();
+
+        for (BasicBlock& basic_block : *function)
+          for (Instruction& inst : basic_block)
+            if (ReturnInst *ri = dyn_cast<ReturnInst>(&inst)) {
+
+              // 반환되는 내용은 반드시 ReturnInst를 거쳐야됩니다. 따라서 ReturnInst의
+              // Operand에 영향을 미치는 것들을 차례로 조사합니다. 이 과정은 함수 내부에
+              // 모든 ReturnInst를 조사합니다.
+              inst_dependency = new InstructionDependency();
+              runBottomUp(ri->getReturnValue());
+              delete inst_dependency;
+            }
+      }
+
+    private:
+      
+      /// [정보]
+      /// 어떤 함수인자가 V에 영향을 미치는지 검사합니다. 이 과정은
+      /// 재귀적으로 진행됩니다.
+      void runBottomUp(Value *V)
+      {
+        if (Argument *arg = dyn_cast<Argument> (V)) {
+          function_dependency->setReturnDependency(arg->getArgNo());
+          return;
+        }
+        
+        if (Instruction *inst = dyn_cast <Instruction> (V))
+        {
+          if (inst_dependency->hasInstructoin(inst))
+            return;
+
+          inst_dependency->addInstruction(inst);
+
+          // PHINode와 기타 Instruction은 Operand에 접근하는 방법이 다릅니다.
+          // 따라서 두 가지 분리하여 검사하였습니다.
+          // 다른 접근 방법을 가진 Instruction은 여기서 특수화 해야합니다.
+          if (PHINode *phi = dyn_cast<PHINode> (inst)) {
+            for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+              Value *target_value = phi->getIncomingValue(i);
+              runBottomUp(target_value);
+              runSearch(target_value);
+            }
+          } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
+
+            // 어떤 함수인자가 반환값에 영향을 미칩니까?
+            FunctionDependency *depends = processCallInst(ci);
+            size_t count = depends->getFunctionDependencyNum() - 1;
+
+            // 반환값에 영향을 미치는 모든 함수인자들은 V에 영향을 미치게 됩니다.
+            for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
+              if (depends->hasReturnDependency(i) == true) {
+                runBottomUp(ci->getOperand(i));
+                runSearch(ci->getOperand(i));
+              }
+
+          } else {
+            for (unsigned i = 0; i < inst->getNumOperands(); i++) {
+              Value *target_value = inst->getOperand(i);
+              runBottomUp(target_value);
+              runSearch(target_value);
+            }
+          }
+        }
+      }
+      
+      /// [정보]
+      /// CallInst에 의해 호출된 함수의 Dependency를 가져옵니다.
+      ///
+      /// [보충]
+      /// - callinst를 만났을 경우 다음과 같은 두 가지 영향을 분석합니다.
+      ///   1. 반환값에 영향을 미치는 함수인자들의 목록
+      ///   2. 포인터 함수인자에 영향을 미치는 함수인자들의 목록
+      /// - 이 함수와 동일한 이름을 갖는 함수는 모두 같은 기능을 가집니다.
+      FunctionDependency *processCallInst(CallInst *CI)
+      {
+        FunctionDependency *depends = nullptr;
+        Function *target_function = CI->getCalledFunction();
+
+        if (dependency_map->hasDependency(target_function)) {
+          depends = dependency_map->getDependency(target_function);
+        } else {
+          depends = new FunctionDependency(target_function);
+          run(depends, dependency_map);
+          dependency_map->addDependency(target_function, depends);
+        }
+
+        function_dependency->addFunctionDependency(depends);
+
+        return depends;
+      }
+
+      /// [정보]
+      /// Node따라가기에서 찾지못하는 특정 변수의 Dependency를 분석하기 위해
+      /// 몇 가지 조건을 검사합니다. 이 단계에선 [보충]경우에서의 Dependency를
+      /// 예상할 뿐 확신을 할 수는 없습니다.
+      /// 
+      /// [보충]
+      /// - 현재까지 다음과 같은 세 가지 경우에서만 변수를 변경될 수 있음을
+      ///   확인했습니다.
+      ///   1. StoreInst: StoreInst는 register에 값을 쓰는 역할을 담당합니다.
+      ///      따라서 StoreInst의 Pointer가 찾으려는 변수일 경우를 확인합니다.
+      ///   2. LoadInst: LoadInst의 Pointer가 찾으려는 변수일 경우, LoadInst
+      ///      그 자체가 해당 변수를 담당할 수 있습니다.
+      ///   3. CallInst: 찾으려는 변수가 포인터형태의 함수인자로 어떤 함수에 넘겨지는 
+      ///      경우 해당 함수의 다른 함수인자들이 이 변수에 영향을 미칠 수 있습니다.
+      void runSearch(Value *V)
+      {
+        for (BasicBlock& basic_block : *function)
+          for (Instruction& inst : basic_block) {
+            if (StoreInst *si = dyn_cast<StoreInst> (&inst))
+            {
+              if (si->getPointerOperand() == V)
+                runBottomUp(si->getValueOperand());
+            }
+            else if (LoadInst *li = dyn_cast<LoadInst> (&inst))
+            {
+              if (li->getPointerOperand() == V)
+                runBottomUp(li);
+            }
+            else if (CallInst *ci = dyn_cast<CallInst> (&inst))
+            {
+              FunctionDependency *depends = processCallInst(ci);
+              for (size_t i = 0; i < depends->getFunction()->arg_size(); i++)
+                if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
+                  for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
+                    if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j))
+                      runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument());
+            }
+          }
+      }
+
+    };
+
+    class FunctionArgumentDependencyCheck
+    {
+      Function *function;
+      DependencyMap *dependency_map;
+      FunctionDependency *function_dependency;
+      std::vector<Value *> overlap;
+
+    public:
+
+      FunctionArgumentDependencyCheck(FunctionDependency *FD, DependencyMap *DM)
+        : function_dependency(FD), dependency_map(DM)
+      {
+        function = function_dependency->getFunction();
+
+        for (Argument *arg = function->arg_begin(); arg != function->arg_end(); arg++)
+          if (arg->getType()->isPointerTy())
+            for (Argument *arg2 = function->arg_begin(); arg2 != function->arg_end(); arg2++)
+              if (arg != arg2) {
+                overlap.clear();
+                runChecker(arg, arg2);
+              }
+      }
+
+    private:
+
+      FunctionDependency *processCallInst(CallInst *CI)
+      {
+        FunctionDependency *depends = nullptr;
+        Function *target_function = CI->getCalledFunction();
+
+        if (dependency_map->hasDependency(target_function)) {
+          depends = dependency_map->getDependency(target_function);
+        } else {
+          depends = new FunctionDependency(target_function);
+          run(depends, dependency_map);
+          dependency_map->addDependency(target_function, depends);
+        }
+
+        function_dependency->addFunctionDependency(depends);
+
+        return depends;
+      }
+      
+      /// [정보]
+      /// 검사하려는 함수인자 A와 같은 V가 있는지 재귀적으로 검사합니다.
+      /// 이 함수는 runBottomUp과 runSearch를 합한 형태를 가집니다.
+      ///
+      /// [보충]
+      /// 
+      void runChecker(Argument *A, Value *V)
+      {
+        if (Argument *arg = dyn_cast<Argument> (V)) {
+          function_dependency->getFunctionArgumentDependency(
+            A->getArgNo())->setArgumentDependency(arg->getArgNo());
+          return;
+        }
+
+        // 이 함수는 무한재귀 성질을 가지므로 중복검사를 시행합니다.
+        if (std::find(overlap.begin(), overlap.end(), V) != overlap.end())
+          return;
+        overlap.push_back(V);
+        
+        // runSearch 알고리즘
+        for (BasicBlock& basic_block : *function)
+          for (Instruction& inst : basic_block) {
+            if (StoreInst *si = dyn_cast<StoreInst> (&inst))
+            {
+              if (si->getPointerOperand() == V)
+                runChecker(A, si->getValueOperand());
+              else if (si->getValueOperand() == V)
+                runChecker(A, si->getPointerOperand());
+            }
+            else if (LoadInst *li = dyn_cast<LoadInst> (&inst))
+            {
+              if (li->getPointerOperand() == V)
+                runChecker(A, li);
+            }
+            else if (CallInst *ci = dyn_cast<CallInst> (&inst))
+            {
+              FunctionDependency *depends = processCallInst(ci);
+              for (size_t i = 0; i < depends->getFunction()->arg_size(); i++)
+                if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
+                  for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
+                    if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j))
+                      runChecker(A, depends->getFunctionArgumentDependency(j)->getArgument());
+            }
+          }
+
+        // runBottomUp 알고리즘
+        if (Instruction *inst = dyn_cast <Instruction> (V))
+        {
+          if (PHINode *phi = dyn_cast<PHINode> (inst)) {
+            for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+              Value *target_value = phi->getIncomingValue(i);
+              runChecker(A, target_value);
+            }
+          } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
+            FunctionDependency *depends = processCallInst(ci);
+            for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
+              if (depends->hasReturnDependency(i) == true) {
+                runChecker(A, ci->getOperand(i));
+              }
+          } else {
+            for (unsigned i = 0; i < inst->getNumOperands(); i++) {
+              Value *target_value = inst->getOperand(i);
+              runChecker(A,target_value);
+            }
+          }
+        }
+      }
+
+    };
+    
+    class FunctionMaybeDependencyChecker
+    {
+
+    };
+  };
+  
+  /// This class must be called only once by each target-function.
+  class BottomUpDependencyChecker
+  {
+    Function *function;
+    DependencyMap *dependency_map;
+    FunctionDependency *function_dependency;
+    InstructionDependency *inst_dependency;
+
+  public:
+
+    BottomUpDependencyChecker(Function *F, SmallVector<Value *, 16> V,
+      DependencyMap *DM, FunctionDependency *FD, InstructionDependencyMap *IDM)
+      : function(F), dependency_map(DM), function_dependency(FD)
+    {
+      for (Value *value : V)
+      {
+        inst_dependency = new InstructionDependency();
+        runBottomUp(value);
+        IDM->addDependency(value, inst_dependency);
+        inst_dependency = nullptr;
+      }
     }
 
   private:
-    
-    ///-------------------------------------------------
-    ///
-    /// Function Scope
-    ///
-    ///-------------------------------------------------
 
-    void instDependency(Function *F, Value *V)
+    void runBottomUp(Value *V)
     {
-      errs() << " - Dependent value : " << V->getName() << "\n";
-
-      followFromBB(F, V);
-      dependency_map.insert(std::pair<Value *, std::vector<Instruction *>>(V, dependency));
-      dependency.clear();
-    }
-
-    void followRoot(Function *F, Value *V)
-    {
-      if (Instruction *inst = dyn_cast<Instruction> (V))
+      if (Instruction *inst = dyn_cast <Instruction> (V))
       {
-        for (auto v : dependency)
-          if (v == inst) return;
-        dependency.push_back(inst);
+        if (inst_dependency->hasInstructoin(inst))
+          return;
 
-        errs() << "     - " << *inst << "\n";
+        inst_dependency->addInstruction(inst);
 
-        if (PHINode *phi = dyn_cast<PHINode> (inst))
-        {
-          for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
-          {
-            followRoot(F, phi->getIncomingValue(i));
-            followFromBB(F, phi->getIncomingValue(i));
+        if (PHINode *phi = dyn_cast<PHINode> (inst)) {
+          for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+            Value *target_value = phi->getIncomingValue(i);
+            runBottomUp(target_value);
+            runSearch(target_value);
           }
-        }
-        else if (CallInst *ci = dyn_cast<CallInst> (inst))
-        {
-          for (auto arg : followFunction(ci->getCalledFunction()))
-          {
-            unsigned num = arg->getArgNo();
-            followRoot(F, ci->getOperand(num));
-            followFromBB(F, ci->getOperand(num));
-          }
-        }
-        else 
-        {
-          for (unsigned i = 0; i < inst->getNumOperands(); i++)
-          {
-            followRoot(F, inst->getOperand(i));
-            followFromBB(F, inst->getOperand(i));
+        } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
+          FunctionDependency *depends = processCallInst(ci);
+          for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
+            if (depends->hasReturnDependency(i) == true) {
+              runBottomUp(ci->getOperand(i));
+              runSearch(ci->getOperand(i));
+            }
+        } else {
+          for (unsigned i = 0; i < inst->getNumOperands(); i++) {
+            Value *target_value = inst->getOperand(i);
+            runBottomUp(target_value);
+            runSearch(target_value);
           }
         }
       }
     }
 
-    void followFromBB(Function *F, Value *V)
+    FunctionDependency *processCallInst(CallInst *CI)
     {
-      for (auto& bb : *F)
-      {
-        for (auto& i : bb)
-        {
-          if (StoreInst* si = dyn_cast<StoreInst> (&i))
+      FunctionDependency *depends = nullptr;
+      Function *target_function = CI->getCalledFunction();
+      
+      if (dependency_map->hasDependency(target_function)) {
+        depends = dependency_map->getDependency(target_function);
+        errs() << depends->getFunction()->getName() << "\n";
+      } else {
+        depends = new FunctionDependency(target_function);
+        DependencyChecker::run(depends, dependency_map);
+        dependency_map->addDependency(target_function, depends);
+      }
+
+      function_dependency->addFunctionDependency(depends);
+
+      return depends;
+    }
+
+    void runSearch(Value *V)
+    {
+      for (BasicBlock& basic_block : *function)
+        for (Instruction& inst : basic_block) {
+
+          if (inst_dependency->hasInstructoin(&inst))
+            return;
+
+          if (StoreInst *si = dyn_cast<StoreInst> (&inst))
           {
             if (si->getPointerOperand() == V)
-            {
-              followRoot(F, si->getValueOperand());
-            }
+              runBottomUp(si->getValueOperand());
           }
-          else if (LoadInst *li = dyn_cast<LoadInst> (&i))
+          else if (LoadInst *li = dyn_cast<LoadInst> (&inst))
           {
             if (li->getPointerOperand() == V)
-            {
-              followRoot(F, li);
-            }
+              runBottomUp(li);
           }
-          else if (CallInst *ci = dyn_cast<CallInst> (&i))
+          else if (CallInst *ci = dyn_cast<CallInst> (&inst))
           {
-            Function *CF = ci->getCalledFunction();
-            for (auto arg = CF->arg_begin(); arg != CF->arg_end(); arg++)
-            {
-              if (ci->getOperand(arg->getArgNo()) == V && arg->getType()->isPointerTy())
-              {
-                std::vector<Argument *> args = findReferenceable(CF, arg);
-                for (auto value : args)
-                  followRoot(F, ci->getOperand(value->getArgNo()));
-                if (args.size() > 0)
-                  dependency.push_back(&i);
-                break;
-              }
-            }
+            FunctionDependency *depends = processCallInst(ci);
+            for (size_t i = 0; i < depends->getFunction()->arg_size(); i++)
+              if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
+                for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
+                  if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j))
+                    runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument());
           }
         }
-      }
-    }
-
-    ///-------------------------------------------------
-    ///
-    /// Interprocedural Scope - (1) returns
-    ///
-    ///-------------------------------------------------
-    
-    std::vector<std::tuple<Value *, Argument *>> overlap1;
-
-    std::vector<Argument *> followFunction(Function *F)
-    {
-      std::vector<Argument *> vec;
-      std::vector<Argument *> args;
-      for (auto arg = F->arg_begin(); arg != F->arg_end(); arg++)
-        args.push_back(arg);
-      
-      for (auto& bb : *F)
-      {
-        for (auto& i : bb)
-        {
-          if (ReturnInst *RI = dyn_cast<ReturnInst>(&i))
-          {
-            for (auto arg : args)
-            {
-              overlap1.clear();
-              if (followFunctionRoot(F, RI->getReturnValue(), arg))
-                vec.push_back(arg);
-            }
-          }
-        }
-      }
-
-      return vec;
-    }
-
-    bool followFunctionRoot(Function *F, Value *V, Argument *A)
-    {
-      if (V == A) return true;
-      if (Instruction *inst = dyn_cast<Instruction> (V))
-      {
-        for (auto v : overlap1)
-          if (std::get<0>(v) == V && std::get<1>(v) == A) return false;
-        overlap1.push_back(std::tuple<Value *, Argument *>(V,A));
-
-        errs() << "       - (" << F->getName() << ") " << *inst << "\n";
-
-        if (PHINode *phi = dyn_cast<PHINode> (inst))
-        {
-          for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
-          {
-            if (followFunctionRoot(F, phi->getIncomingValue(i), A) ||
-              followFunctionFromBB(F, phi->getIncomingValue(i), A))
-              return true;
-          }
-        }
-        else if (CallInst *ci = dyn_cast<CallInst> (inst))
-        {
-          for (auto arg : followFunction(ci->getCalledFunction()))
-          {
-            unsigned num = arg->getArgNo();
-
-            if (followFunctionRoot(F, ci->getOperand(num), A) ||
-              followFunctionFromBB(F, ci->getOperand(num), A))
-              return true;
-          }
-        }
-        else 
-        {
-          for (unsigned i = 0; i < inst->getNumOperands(); i++)
-          {
-            if (followFunctionRoot(F, inst->getOperand(i), A) ||
-              followFunctionFromBB(F, inst->getOperand(i), A))
-              return true;
-          }
-        }
-      }
-      return false;
-    }
-
-    bool followFunctionFromBB(Function *F, Value *V, Argument *A)
-    {
-      for (auto& bb : *F)
-      {
-        for (auto& i : bb)
-        {
-          if (StoreInst* si = dyn_cast<StoreInst> (&i))
-          {
-            if (si->getPointerOperand() == V)
-            {
-              if (followFunctionRoot(F, si->getValueOperand(), A))
-                return true;
-            }
-          }
-          else if (LoadInst* si = dyn_cast<LoadInst> (&i))
-          {
-            if (si->getPointerOperand() == V)
-            {
-              if (followFunctionRoot(F, si, A))
-                return true;
-            }
-          }
-          else if (CallInst *ci = dyn_cast<CallInst> (&i))
-          {
-            Function *CF = ci->getCalledFunction();
-            for (auto arg = CF->arg_begin(); arg != CF->arg_end(); arg++)
-            {
-              if (ci->getOperand(arg->getArgNo()) == V && arg->getType()->isPointerTy())
-              {
-                for (auto value : findReferenceable(CF, arg))
-                  if (followFunctionRoot(F, ci->getOperand(value->getArgNo()), A))
-                    return true;
-                break;
-              }
-            }
-          }
-        }
-      }
-      return false;
-    }
-    
-    ///-------------------------------------------------
-    ///
-    /// Interprocedural Scope - (2) referenceable
-    ///
-    ///-------------------------------------------------
-    
-    std::vector<std::tuple<Value *, Argument *>> overlap2;
-
-    std::vector<Argument *> findReferenceable(Function *F, Argument *A)
-    {
-      std::vector<Argument *> vec;
-      for (auto arg = F->arg_begin(); arg != F->arg_end(); arg++)
-        if (arg != A)
-        {
-          overlap2.clear();
-          if (findReferenceableUpBottom(F, arg, A))
-            vec.push_back(arg);
-        }
-      errs() << "size: (" << F->getName() << ")" << vec.size() << " :" << *A <<"\n";
-      return vec;
-    }
-
-    bool findReferenceableUpBottom(Function *F, Value *V, Argument *A)
-    {
-      if (V == A) return true;
-
-      for (auto v : overlap2)
-        if (std::get<0>(v) == V && std::get<1>(v) == A) return false;
-      overlap2.push_back(std::tuple<Value *, Argument *>(V,A));
-
-      errs() << "         - (" << F->getName() << ") " << *V << "\n";
-      
-      for (auto& bb : *F)
-      {
-        for (auto& i : bb)
-        {
-          if (StoreInst *si = dyn_cast<StoreInst> (&i))
-          {
-            if (si->getValueOperand() == V)
-            {
-              if (findReferenceableUpBottom(F, si->getPointerOperand(), A))
-                return true;
-            }
-            else if (si->getPointerOperand() == V)
-            {
-              if (findReferenceableUpBottom(F, si->getValueOperand(), A))
-                return true;
-            }
-          }
-          else if (LoadInst *li = dyn_cast<LoadInst> (&i))
-          {
-            if (li->getPointerOperand() == V)
-            {
-              if (findReferenceableUpBottom(F, li, A))
-                return true;
-            }
-          }
-          else if (CallInst *ci = dyn_cast<CallInst> (&i))
-          {
-            Function *CF = ci->getCalledFunction();
-            for (auto arg = CF->arg_begin(); arg != CF->arg_end(); arg++)
-            {
-              if (ci->getOperand(arg->getArgNo()) == V)
-              {
-                for (auto argv : followFunction(CF))
-                {
-                  if (argv->getArgNo() == arg->getArgNo())
-                  {
-                    if (findReferenceableUpBottom(F, &i, A))
-                      return true;
-                    break;
-                  }
-                }
-                break;
-              }
-            }
-          }
-          else
-          {
-            for (unsigned j = 0; j < i.getNumOperands(); j++)
-            {
-              if (i.getOperand(j) == V)
-                if (findReferenceableUpBottom(F, &i, A))
-                  return true;
-            }
-          }
-        }
-      }
-
-      if (Instruction *inst = dyn_cast<Instruction> (V))
-      {
-        if (PHINode *phi = dyn_cast<PHINode> (inst))
-        {
-          for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
-          {
-            if (findReferenceableUpBottom(F, phi->getIncomingValue(i), A))
-              return true;
-          }
-        }
-        else if (CallInst *ci = dyn_cast<CallInst> (inst))
-        {
-          for (auto arg : followFunction(ci->getCalledFunction()))
-          {
-            unsigned num = arg->getArgNo();
-
-            if (findReferenceableUpBottom(F, ci->getOperand(num), A))
-              return true;
-          }
-        }
-        else 
-        {
-          for (unsigned i = 0; i < inst->getNumOperands(); i++)
-          {
-            if (findReferenceableUpBottom(F, inst->getOperand(i), A))
-              return true;
-          }
-        }
-      }
-      
-      /*std::vector<std::tuple<Value *, Argument *>> tmp = overlap1;
-      overlap1.clear();
-      if (followFunctionRoot(F, V, A))
-        return true;
-      overlap1 = tmp;*/
-
-      return false;
     }
 
   };
-  
-  struct CustomPass : public FunctionPass {
-    static char ID;
 
-    CustomPass()
+  class DependencyManager
+  {
+  public:
+    using AnnotatedTuple = std::tuple<Value *, CallInst *>;
+    using AnnotatedVector = SmallVector<AnnotatedTuple, 8>;
+
+  private:
+    DependencyMap *map;
+    DependencyMap *annotated_map;
+    Function *target_function;
+    AnnotatedVector annotated_value;
+
+  public:
+
+    DependencyManager(Function *TargetFunction, DependencyMap *Map, DependencyMap *AnnotatedMap)
+      : target_function(TargetFunction), map(Map), annotated_map(AnnotatedMap)
+    {
+      calAnnotatedValue();
+    }
+
+    void run()
+    {
+      FunctionDependency *fd = new FunctionDependency(target_function);
+      InstructionDependencyMap *idm = new InstructionDependencyMap();
+
+      SmallVector<Value *, 16> annotated_stores;
+
+      for (BasicBlock& basic_block : *target_function)
+        for (Instruction& inst : basic_block)
+          if (StoreInst *si = dyn_cast<StoreInst> (&inst))
+            if (isAnnotated(si->getPointerOperand()))
+              annotated_stores.push_back(si->getValueOperand());
+
+      BottomUpDependencyChecker checker(target_function, annotated_stores, map, fd, idm);
+      
+      fd->setInstructionDependencyMap(idm);
+      annotated_map->addDependency(target_function, fd);
+    }
+
+    AnnotatedVector& getAnnotatedVariableList()
+    {
+      return annotated_value;
+    }
+    
+    StringRef getAnnotatedMessage(CallInst *ci)
+    {
+      ConstantExpr *ce = cast<ConstantExpr>(ci->getArgOperand(1));
+      GlobalVariable *gv = cast<GlobalVariable>(ce->getOperand(0));
+      Constant *cs = gv->getInitializer();
+      ConstantDataArray *cda = cast<ConstantDataArray>(cs);
+      return cda->getAsCString();
+    }
+
+  private:
+
+    bool isAnnotated(Value *v)
+    {
+      for (AnnotatedTuple at : annotated_value) {
+        if (std::get<0>(at) == v)
+          return true;
+      }
+      return false;
+    }
+
+    /// get all annotated-variable in target-function
+    void calAnnotatedValue()
+    {
+      for (BasicBlock& basic_block : *target_function)
+        for (Instruction& inst : basic_block)
+          if (CallInst *ci = dyn_cast<CallInst> (&inst))
+            if (ci->getCalledFunction()->getName() == llvm_annotate_variable)
+              annotated_value.push_back(AnnotatedTuple((
+                cast<BitCastInst>(ci->getArgOperand(0)))->getOperand(0), ci));
+    }
+
+  };
+
+  ///---------------------------------------------------------
+  ///
+  ///            LLVM-IR Nodes Traversal
+  ///
+  ///---------------------------------------------------------
+  
+  ///---------------------------------------------------------
+  ///
+  ///            LLVM-IR Nodes Traversal
+  ///
+  ///---------------------------------------------------------
+
+  class DependencyPrinter
+  {
+    Function *target_function;
+    DependencyMap *annotated_map;
+    std::string tab;
+
+  public:
+
+    DependencyPrinter(DependencyMap *AnnotatedMap)
+      : annotated_map(AnnotatedMap)
+    {
+    }
+
+    void setTargetFunction(Function *F)
+    {
+      target_function = F;
+    }
+
+    void printTargetFunctionName()
+    {
+      out() << "Function - " << target_function->getName() << "\n";
+    }
+
+    void printTargetFunctionAnnotatedVariable(DependencyManager *DM)
+    {
+      DependencyManager::AnnotatedVector vec = DM->getAnnotatedVariableList();
+      increaseTab();
+      if (vec.size() == 0)
+      {
+        out() << "Annotated Variable is not found.\n\n";
+        increaseTab();
+        return;
+      }
+      out() << "Annotated Variable List :\n";
+      increaseTab();
+      for (DependencyManager::AnnotatedTuple& tu : vec)
+      {
+        StringRef message = DM->getAnnotatedMessage(std::get<1>(tu));
+        out() << "- Annotated : " << std::get<0>(tu)->getName() << "(message: " << message << ")\n";
+      }
+      out() << "\n";
+      decreaseTab();
+      decreaseTab();
+    }
+
+    void printTargetFunctionDependencyInstruction()
+    {
+      FunctionDependency *dependency = annotated_map->getDependency(target_function);
+      InstructionDependencyMap *inst_map = dependency->getInstrctionDependencyMap();
+      
+      increaseTab();
+      for (auto element : *inst_map)
+      {
+        out() << "Annotated-Variable : " << element.first->getName() << "\n";
+        increaseTab();
+        InstructionDependency *inst_dependency = element.second;
+        for (auto inst : *inst_dependency)
+        {
+          out() << *inst << "\n";
+        }
+        out() << "\n";
+        decreaseTab();
+      }
+      decreaseTab();
+    }
+
+  private:
+
+    void increaseTab()
+    {
+      tab += "    ";
+    }
+    void decreaseTab()
+    {
+      tab.erase(0, 3);
+    }
+
+    raw_ostream& out()
+    {
+      return errs() << tab;
+    }
+
+  };
+
+  ///---------------------------------------------------------
+  ///
+  ///       Interprocedural Dependency Checker Pass
+  ///
+  ///---------------------------------------------------------
+
+  struct InterproceduralDependencyCheckPass : public FunctionPass 
+  {
+    static char ID;
+    
+    DependencyMap *dependency_map;
+    DependencyMap *annotated_map;
+    std::map<Function *, DependencyManager *> function_map;
+
+    InterproceduralDependencyCheckPass()
       : FunctionPass(ID)
     {
+      dependency_map = new DependencyMap();
+      annotated_map = new DependencyMap();
+    }
+
+    ~InterproceduralDependencyCheckPass()
+    {
+      delete dependency_map;
     }
 
     bool runOnFunction(Function &F) override
     {
-      errs() << "\n";
-      errs() << "Function " << F.getName() + "\n";
-      std::vector<Value *> v = findAnnotation(F);
-      DependencyManager dm(&F, v);
-      const std::map<Value *, std::vector<Instruction *>>& insts = dm.findDependency();
-      errs() << "\n";
+      DependencyManager *dm = new DependencyManager(&F, dependency_map, annotated_map);
+      dm->run();
+      function_map[&F] = dm;
+      print(&F);
       return false;
     }
 
-    /// annotate의 메시지를 출력합니다.
-    /// 예를 들어, int __attribute__((annotate("xxx"))) a; 같은 구문에서 "xxx"를 가져옵니다.
-    StringRef getAnnotatedString(CallInst *c)
+    void print(Function *F)
     {
-      Constant *cs = (cast<GlobalVariable>((cast<ConstantExpr>(c->getArgOperand(1)))->getOperand(0)))->getInitializer();
-      return cast<ConstantDataArray>(cs)->getAsCString();
-    }
+      DependencyPrinter printer(annotated_map);
+      printer.setTargetFunction(F);
 
-    /// 모든 annotate변수를 찾습니다.
-    /// 반환되는 벡터에는 annotate된 변수 그 자체의 포인터만 들어갑니다.
-    std::vector<Value *> findAnnotation(Function &F)
-    {
-      std::vector<Value *> annotate;
-      for (auto& bb : F)
-      {
-        for (auto& k : bb)
-        {
-          if (CallInst *c = dyn_cast<CallInst> (&k))
-          {
-            Function *cf = c->getCalledFunction();
-            if (cf->getName() == "llvm.var.annotation")
-            {
-              Value *v = (cast<BitCastInst>(c->getArgOperand(0)))->getOperand(0);
-              annotate.push_back(v);
-
-              errs() << " - Detected annotated string : " << getAnnotatedString(c) << "("
-                << v->getName() << ")" << "\n";
-            }
-          }
-        }
-      }
-      errs() << "\n";
-      return annotate;
+      printer.printTargetFunctionName();
+      printer.printTargetFunctionAnnotatedVariable(function_map[F]);
+      printer.printTargetFunctionDependencyInstruction();
     }
 
   };
 
 }
 
-char CustomPass::ID = 0;
-static RegisterPass<CustomPass> X("custom", "CustomPass");
+char InterproceduralDependencyCheckPass::ID = 0;
+static RegisterPass<InterproceduralDependencyCheckPass> X("custom", "CustomPass");
