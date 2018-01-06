@@ -31,6 +31,100 @@ namespace {
   
   ///---------------------------------------------------------
   ///
+  ///          Branch Map
+  ///
+  ///---------------------------------------------------------
+
+  class BlockNode
+  {
+    BasicBlock *basic_block;
+    BranchInst *branch_inst;
+    SmallVector<BlockNode *, 4> from_node;
+    SmallVector<BlockNode *, 4> to_node;
+
+  public:
+
+    BlockNode(BasicBlock *BB) : basic_block(BB), branch_inst(nullptr) { }
+    
+    void addFromNode(BlockNode *BN) { from_node.push_back(BN); }
+    SmallVector<BlockNode *, 4>& getFromNodes() { return from_node; }
+    void addToNode(BlockNode *BN) { to_node.push_back(BN); }
+    SmallVector<BlockNode *, 4>& getToNodes() { return to_node; }
+
+    void setBranchInst(BranchInst *BI) { branch_inst = BI; }
+    BranchInst *getBranchInst() { return branch_inst; }
+
+    BasicBlock *getBasicBlock() { return basic_block; }
+  };
+
+  class BranchManager
+  {
+    Function *function;
+    BlockNode *start;
+    std::vector<BlockNode *> nodes;
+
+  public:
+
+    BranchManager(Function *F) : function(F) 
+    {
+      if (!F->isIntrinsic()) 
+      {
+        start = createNode(&F->getEntryBlock());
+        nodes.push_back(start);
+        if (BranchInst *bi = dyn_cast<BranchInst> (&start->getBasicBlock()->back())) {
+          start->setBranchInst(bi);
+          for (size_t i = 0; i < bi->getNumSuccessors(); i++)
+            start->addToNode(run(bi->getSuccessor(i), start));
+        }
+      }
+    }
+
+    BlockNode *getNodeFromInstruction(Instruction *inst)
+    {
+      for (BlockNode *bn : nodes)
+        for (Instruction& i : *bn->getBasicBlock())
+          if (&i == inst)
+            return bn;
+      return nullptr;
+    }
+
+  private:
+
+    BlockNode *createNode(BasicBlock *BB)
+    {
+      return new BlockNode(BB);
+    }
+
+    BlockNode *run(BasicBlock *BB, BlockNode *P)
+    {
+      BlockNode *node = createNode(BB);
+      node->addFromNode(P);
+      nodes.push_back(node);
+      Instruction *last = &BB->back();
+      if (BranchInst *bi = dyn_cast<BranchInst> (last))
+      {
+        node->setBranchInst(bi);
+        for (size_t i = 0; i < bi->getNumSuccessors(); i++)
+        {
+          for (size_t j = 0; j < nodes.size(); j++)
+            if (nodes[j]->getBasicBlock() == bi->getSuccessor(i))
+            {
+              node->addToNode(nodes[j]);
+              nodes[j]->addFromNode(node);
+              goto FINISH;
+            }
+          node->addToNode(run(bi->getSuccessor(i), node));
+        FINISH:
+          ;
+        }
+      }
+      return node;
+    }
+
+  };
+
+  ///---------------------------------------------------------
+  ///
   ///                    Pass Tools
   ///
   ///---------------------------------------------------------
@@ -117,12 +211,14 @@ namespace {
     InstructionDependencyMap *insts_map = nullptr;
     InstructionDependency *return_instruction_dependency = nullptr;
     ArgumentInstructionDependencyMap *arg_map = nullptr;
+    BranchManager *branch_manager;
 
   public:
 
     FunctionDependency(Function *F) 
       : function (F), return_dependency(F->arg_size()), arg_dependency(F->arg_size()) 
     {
+      branch_manager = new BranchManager(F);
       for (size_t i = 0; i < F->arg_size(); i++)
       {
         Argument *arg = F->arg_begin() + i;
@@ -135,6 +231,7 @@ namespace {
       if (insts_map) delete insts_map;
       if (return_instruction_dependency) delete return_instruction_dependency;
       if (arg_map) delete arg_map;
+      delete branch_manager;
     }
 
     Function* getFunction() { return function; }
@@ -161,6 +258,8 @@ namespace {
     /// argument instruction dependency
     void setArgumentInstructionDependencyMap(ArgumentInstructionDependencyMap *AIDM) { arg_map = AIDM; }
     ArgumentInstructionDependencyMap *getArgumentInstructionDependencyMap() { return arg_map; }
+
+    BranchManager *getBranchManager() { return branch_manager; }
   };
   
   class DependencyMap
@@ -179,85 +278,6 @@ namespace {
   
   ///---------------------------------------------------------
   ///
-  ///          Branch Map
-  ///
-  ///---------------------------------------------------------
-
-  class BlockNode
-  {
-    BasicBlock *basic_block;
-    SmallVector<BlockNode *, 4> from_node;
-    SmallVector<BlockNode *, 4> to_node;
-
-  public:
-
-    BlockNode(BasicBlock *BB) : basic_block(BB) { }
-    
-    void addFromNode(BlockNode *BN) { from_node.push_back(BN); }
-    SmallVector<BlockNode *, 4>& getFromNodes() { return from_node; }
-    void addToNode(BlockNode *BN) { to_node.push_back(BN); }
-    SmallVector<BlockNode *, 4>& getToNodes() { return to_node; }
-
-    BasicBlock *getBasicBlock() { return basic_block; }
-  };
-
-  class BranchManager
-  {
-    Function *function;
-    BlockNode *start;
-    std::vector<BlockNode *> nodes;
-
-  public:
-
-    BranchManager(Function *F) : function(F) 
-    {
-      start = createNode(&F->getEntryBlock());
-      nodes.push_back(start);
-      if (BranchInst *bi = dyn_cast<BranchInst> (&start->getBasicBlock()->back()))
-      {
-        for (size_t i = 0; i < bi->getNumSuccessors(); i++)
-        {
-          start->addToNode(run(bi->getSuccessor(i), start));
-        }
-      }
-    }
-
-    BlockNode *getNodeFromInstruction(Instruction *inst)
-    {
-      for (BlockNode *bn : nodes)
-        for (Instruction& i : *bn->getBasicBlock())
-          if (&i == inst)
-            return bn;
-      return nullptr;
-    }
-
-  private:
-
-    BlockNode *createNode(BasicBlock *BB)
-    {
-      return new BlockNode(BB);
-    }
-
-    BlockNode *run(BasicBlock *BB, BlockNode *P)
-    {
-      BlockNode *node = createNode(BB);
-      node->addFromNode(P);
-      nodes.push_back(node);
-      Instruction *last = &BB->back();
-      if (BranchInst *bi = dyn_cast<BranchInst> (last))
-      {
-        for (size_t i = 0; i < bi->getNumSuccessors(); i++)
-        {
-          node->addToNode(run(bi->getSuccessor(i), node));
-        }
-      }
-      return node;
-    }
-
-  };
-
-  ///---------------------------------------------------------
-  ///
   ///          Dependency Check Routine
   ///
   ///---------------------------------------------------------
@@ -270,15 +290,13 @@ namespace {
 
     static void run(FunctionDependency *FD, DependencyMap *DM)
     {
+      if (FD->getFunction()->isIntrinsic()) return;
+
       /// 어떤 함수인자가 반환값에 영향을 미치는지 검사합니다.
       FunctionReturnDependencyChecker return_checker(FD, DM);
 
       /// 어떤 함수인자가 특정 함수인자에 미치는 영향을 검사합니다.
       FunctionArgumentDependencyCheck argument_checker(FD, DM);
-
-      /// 이 함수는 실험적입니다.
-      /// 이 함수는 단독으로 사용되어선 안됩니다.
-      FunctionMaybeDependencyChecker maybe_checker(FD, DM);
     }
 
     class FunctionReturnDependencyChecker
@@ -362,6 +380,8 @@ namespace {
               runSearch(target_value);
             }
           }
+
+          processBranches(V);
         }
       }
       
@@ -394,6 +414,23 @@ namespace {
       }
 
       /// [정보]
+      /// V가 속한 블록에 영향을 미치는 블록을 찾습니다.
+      void processBranches(Value *V)
+      {
+        if (Instruction *inst = dyn_cast<Instruction> (V))
+        {
+          BranchManager *bm = function_dependency->getBranchManager();
+          BlockNode *this_node = bm->getNodeFromInstruction(inst);
+          for (BlockNode *bn : this_node->getFromNodes()) {
+            if (bn->getBranchInst()->isConditional()) {
+              runBottomUp(bn->getBranchInst()->getCondition());
+              runSearch(bn->getBranchInst()->getCondition());
+            }
+          }
+        }
+      }
+
+      /// [정보]
       /// Node따라가기에서 찾지못하는 특정 변수의 Dependency를 분석하기 위해
       /// 몇 가지 조건을 검사합니다. 이 단계에선 [보충]경우에서의 Dependency를
       /// 예상할 뿐 확신을 할 수는 없습니다.
@@ -416,11 +453,6 @@ namespace {
               if (si->getPointerOperand() == V)
                 runBottomUp(si->getValueOperand());
             }
-            else if (LoadInst *li = dyn_cast<LoadInst> (&inst))
-            {
-              if (li->getPointerOperand() == V)
-                runBottomUp(li);
-            }
             else if (CallInst *ci = dyn_cast<CallInst> (&inst))
             {
               FunctionDependency *depends;
@@ -432,6 +464,7 @@ namespace {
                       runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument());
             }
           }
+        processBranches(V);
       }
 
     };
@@ -517,7 +550,7 @@ namespace {
             }
             else if (LoadInst *li = dyn_cast<LoadInst> (&inst))
             {
-              if (li->getPointerOperand() == V)
+              if (si->getPointerOperand() == V)
                 runChecker(A, li);
             }
             else if (CallInst *ci = dyn_cast<CallInst> (&inst))
@@ -531,10 +564,16 @@ namespace {
                       runChecker(A, depends->getFunctionArgumentDependency(j)->getArgument());
             }
           }
-
+        
         // runBottomUp 알고리즘
         if (Instruction *inst = dyn_cast <Instruction> (V))
         {
+          BranchManager *bm = function_dependency->getBranchManager();
+          BlockNode *this_node = bm->getNodeFromInstruction(inst);
+          for (BlockNode *bn : this_node->getFromNodes())
+            if (bn->getBranchInst()->isConditional())
+              runChecker(A, bn->getBranchInst()->getCondition());
+
           if (PHINode *phi = dyn_cast<PHINode> (inst)) {
             for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
               Value *target_value = phi->getIncomingValue(i);
@@ -558,21 +597,6 @@ namespace {
 
     };
 
-    class FunctionMaybeDependencyChecker
-    {
-      Function *function;
-      DependencyMap *dependency_map;
-      FunctionDependency *function_dependency;
-
-    public:
-
-      FunctionMaybeDependencyChecker(FunctionDependency *FD, DependencyMap *DM)
-        : function_dependency(FD), dependency_map(DM)
-      {
-      }
-
-    };
-    
   };
   
   /// This class must be called only once by each target-function.
@@ -633,6 +657,7 @@ namespace {
             runSearch(target_value);
           }
         }
+        processBranches(V);
       }
     }
 
@@ -654,23 +679,31 @@ namespace {
       return depends;
     }
 
+    void processBranches(Value *V)
+    {
+      if (Instruction *inst = dyn_cast<Instruction> (V))
+      {
+        BranchManager *bm = function_dependency->getBranchManager();
+        BlockNode *this_node = bm->getNodeFromInstruction(inst);
+        for (BlockNode *bn : this_node->getFromNodes()) {
+          if (bn->getBranchInst()->isConditional()) {
+            runBottomUp(bn->getBranchInst()->getCondition());
+            runSearch(bn->getBranchInst()->getCondition());
+          }
+        }
+      }
+    }
+
     void runSearch(Value *V)
     {
       for (BasicBlock& basic_block : *function)
         for (Instruction& inst : basic_block) {
-
-          if (inst_dependency->hasInstructoin(&inst))
-            return;
-
           if (StoreInst *si = dyn_cast<StoreInst> (&inst))
           {
-            if (si->getPointerOperand() == V)
+            if (si->getPointerOperand() == V) {
               runBottomUp(si->getValueOperand());
-          }
-          else if (LoadInst *li = dyn_cast<LoadInst> (&inst))
-          {
-            if (li->getPointerOperand() == V)
-              runBottomUp(li);
+              runSearch(si->getValueOperand());
+            }
           }
           else if (CallInst *ci = dyn_cast<CallInst> (&inst))
           {
@@ -678,10 +711,13 @@ namespace {
             for (size_t i = 0; i < depends->getFunction()->arg_size(); i++)
               if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
                 for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
-                  if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j))
+                  if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j)) {
                     runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument());
+                    runSearch(depends->getFunctionArgumentDependency(j)->getArgument());
+                  }
           }
         }
+      processBranches(V);
     }
     
   };
