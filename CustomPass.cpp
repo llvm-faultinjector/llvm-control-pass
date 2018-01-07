@@ -16,13 +16,30 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/ADT/SmallVector.h"
+#include <stack>
 
-#define IDC_PRINT_INSTRUCTION 0
+/// Dependency check과정에서 확인된 inst를 콘솔에 
+/// 출력할 지의 여부를 결정합니다.
+#define IDC_PRINT_INSTRUCTION                       0
+
+/// Dependency check 결과를 출력할 지의 여부를 결정합니다.
+#define IDC_PRINT_RESULT                            1
+
+/// 함수가 정의되지 않은 경우, 콘솔에 메시지를 출력합니다.
+#define IDC_PRINT_MSG_EMPTY_FUNCTION                1
+
+/// 함수가 정의되지 않은 경우, 해당 함수의 함수인자가
+/// 리턴값에 영향을 미치는지 여부를 결정합니다.
+#define IDC_EMPTY_FUNCTION_PARAM_AFFECT_RETURN      1
+
+/// branch map을 이용한 검사를 할 지의 여부를 결정합니다.
+#define IDC_SCAN_CONTROL_FLOW                       1
+
 
 using namespace llvm;
 
 /*
-  The same name function have the same algorithm.
+  Same name function have same algorithm.
 */
 
 namespace {
@@ -69,7 +86,7 @@ namespace {
     {
       if (!F->isIntrinsic()) 
       {
-        start = createNode(&F->getEntryBlock());
+        start = new BlockNode(&F->getEntryBlock());
         nodes.push_back(start);
         if (BranchInst *bi = dyn_cast<BranchInst> (&start->getBasicBlock()->back())) {
           start->setBranchInst(bi);
@@ -90,14 +107,9 @@ namespace {
 
   private:
 
-    BlockNode *createNode(BasicBlock *BB)
-    {
-      return new BlockNode(BB);
-    }
-
     BlockNode *run(BasicBlock *BB, BlockNode *P)
     {
-      BlockNode *node = createNode(BB);
+      BlockNode *node = new BlockNode(BB);
       node->addFromNode(P);
       nodes.push_back(node);
       Instruction *last = &BB->back();
@@ -291,6 +303,16 @@ namespace {
     static void run(FunctionDependency *FD, DependencyMap *DM)
     {
       if (FD->getFunction()->isIntrinsic()) return;
+      if (FD->getFunction()->empty()) {
+#if IDC_PRINT_MSG_EMPTY_FUNCTION
+        errs() << "Function is not defined!\n";
+#endif
+#if IDC_EMPTY_FUNCTION_PARAM_AFFECT_RETURN
+        for (size_t argc = 0; argc < FD->getFunction()->arg_size(); argc++)
+          FD->setReturnDependency(argc);
+#endif
+        return;
+      }
 
       /// 어떤 함수인자가 반환값에 영향을 미치는지 검사합니다.
       FunctionReturnDependencyChecker return_checker(FD, DM);
@@ -417,6 +439,7 @@ namespace {
       /// V가 속한 블록에 영향을 미치는 블록을 찾습니다.
       void processBranches(Value *V)
       {
+#if IDC_SCAN_CONTROL_FLOW
         if (Instruction *inst = dyn_cast<Instruction> (V))
         {
           BranchManager *bm = function_dependency->getBranchManager();
@@ -428,6 +451,7 @@ namespace {
             }
           }
         }
+#endif
       }
 
       /// [정보]
@@ -568,11 +592,13 @@ namespace {
         // runBottomUp 알고리즘
         if (Instruction *inst = dyn_cast <Instruction> (V))
         {
+#if IDC_SCAN_CONTROL_FLOW
           BranchManager *bm = function_dependency->getBranchManager();
           BlockNode *this_node = bm->getNodeFromInstruction(inst);
           for (BlockNode *bn : this_node->getFromNodes())
             if (bn->getBranchInst()->isConditional())
               runChecker(A, bn->getBranchInst()->getCondition());
+#endif
 
           if (PHINode *phi = dyn_cast<PHINode> (inst)) {
             for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
@@ -681,6 +707,7 @@ namespace {
 
     void processBranches(Value *V)
     {
+#if IDC_SCAN_CONTROL_FLOW
       if (Instruction *inst = dyn_cast<Instruction> (V))
       {
         BranchManager *bm = function_dependency->getBranchManager();
@@ -692,6 +719,7 @@ namespace {
           }
         }
       }
+#endif
     }
 
     void runSearch(Value *V)
@@ -804,7 +832,7 @@ namespace {
   
   ///---------------------------------------------------------
   ///
-  ///            LLVM-IR Nodes Traversal
+  ///            Dependency Printer
   ///
   ///---------------------------------------------------------
 
@@ -923,7 +951,9 @@ namespace {
       DependencyManager *dm = new DependencyManager(&F, dependency_map, annotated_map);
       dm->run();
       function_map[&F] = dm;
+#if IDC_PRINT_RESULT
       print(&F);
+#endif
       return false;
     }
 
