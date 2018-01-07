@@ -327,6 +327,7 @@ namespace {
       DependencyMap *dependency_map;
       FunctionDependency *function_dependency;
       InstructionDependency *inst_dependency; // used only checking overlapping
+      std::vector<BlockNode *> block_nodes;
 
     public:
 
@@ -444,14 +445,24 @@ namespace {
         {
           BranchManager *bm = function_dependency->getBranchManager();
           BlockNode *this_node = bm->getNodeFromInstruction(inst);
-          for (BlockNode *bn : this_node->getFromNodes()) {
-            if (bn->getBranchInst()->isConditional()) {
-              runBottomUp(bn->getBranchInst()->getCondition());
-              runSearch(bn->getBranchInst()->getCondition());
-            }
-          }
+          processBlock(this_node);
         }
 #endif
+      }
+      
+      void processBlock(BlockNode *BN)
+      {
+        for (BlockNode *bn : BN->getFromNodes())
+        {
+          for (BlockNode *x : block_nodes)
+            if (x == bn) return;
+          block_nodes.push_back(bn);
+          if (bn->getBranchInst()->isConditional()) {
+            runBottomUp(bn->getBranchInst()->getCondition());
+            runSearch(bn->getBranchInst()->getCondition());
+          }
+          processBlock(bn);
+        }
       }
 
       /// [정보]
@@ -499,6 +510,7 @@ namespace {
       DependencyMap *dependency_map;
       FunctionDependency *function_dependency;
       std::vector<Value *> overlap;
+      std::vector<BlockNode *> block_nodes;
 
     public:
 
@@ -539,6 +551,20 @@ namespace {
         return depends;
       }
       
+      void processBlock(Argument *A, BlockNode *BN)
+      {
+        for (BlockNode *bn : BN->getFromNodes())
+        {
+          for (BlockNode *x : block_nodes)
+            if (x == bn) return;
+          block_nodes.push_back(bn);
+          if (bn->getBranchInst()->isConditional()) {
+            runChecker(A, bn->getBranchInst()->getCondition());
+          }
+          processBlock(A, bn);
+        }
+      }
+
       /// [정보]
       /// 검사하려는 함수인자 A와 같은 V가 있는지 재귀적으로 검사합니다.
       /// 이 함수는 runBottomUp과 runSearch를 합한 형태를 가집니다.
@@ -595,9 +621,7 @@ namespace {
 #if IDC_SCAN_CONTROL_FLOW
           BranchManager *bm = function_dependency->getBranchManager();
           BlockNode *this_node = bm->getNodeFromInstruction(inst);
-          for (BlockNode *bn : this_node->getFromNodes())
-            if (bn->getBranchInst()->isConditional())
-              runChecker(A, bn->getBranchInst()->getCondition());
+          processBlock(A, this_node);
 #endif
 
           if (PHINode *phi = dyn_cast<PHINode> (inst)) {
@@ -632,6 +656,7 @@ namespace {
     DependencyMap *dependency_map;
     FunctionDependency *function_dependency;
     InstructionDependency *inst_dependency;
+    std::vector<BlockNode *> block_nodes;
 
   public:
 
@@ -704,7 +729,7 @@ namespace {
 
       return depends;
     }
-
+    
     void processBranches(Value *V)
     {
 #if IDC_SCAN_CONTROL_FLOW
@@ -712,14 +737,24 @@ namespace {
       {
         BranchManager *bm = function_dependency->getBranchManager();
         BlockNode *this_node = bm->getNodeFromInstruction(inst);
-        for (BlockNode *bn : this_node->getFromNodes()) {
-          if (bn->getBranchInst()->isConditional()) {
-            runBottomUp(bn->getBranchInst()->getCondition());
-            runSearch(bn->getBranchInst()->getCondition());
-          }
-        }
+        processBlock(this_node);
       }
 #endif
+    }
+
+    void processBlock(BlockNode *BN)
+    {
+      for (BlockNode *bn : BN->getFromNodes())
+      {
+        for (BlockNode *x : block_nodes)
+          if (x == bn) return;
+        block_nodes.push_back(bn);
+        if (bn->getBranchInst()->isConditional()) {
+          runBottomUp(bn->getBranchInst()->getCondition());
+          runSearch(bn->getBranchInst()->getCondition());
+        }
+        processBlock(bn);
+      }
     }
 
     void runSearch(Value *V)
