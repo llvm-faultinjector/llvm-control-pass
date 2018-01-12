@@ -10,6 +10,7 @@
 
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
@@ -143,14 +144,29 @@ namespace {
 
   class InstructionDependency
   {
-    using InstsType = std::vector<Instruction *>;
-    std::vector<Instruction *> insts;
+    using PairType = std::pair<Instruction *, bool>;
+    using InstsType = std::vector<PairType>;
+    InstsType insts;
 
   public:
 
-    bool hasInstructoin(Instruction *I)
-    { return std::find(insts.begin(), insts.end(), I) != insts.end(); }
-    void addInstruction(Instruction *I) { insts.push_back(I); }
+    bool hasInstructoin(Instruction *I, bool P = true)
+    { 
+      for (auto& pair : insts) 
+        if (pair.first == I && (pair.second == P || pair.second))
+          return true;
+      return false;
+    }
+    void addInstruction(Instruction *I, bool P = true) 
+    {
+      for (auto& pair : insts)
+        if (pair.first == I)
+        {
+          if (P) pair.second = true;
+          return;
+        }
+      insts.push_back(PairType(I,P));
+    }
 
     InstsType::iterator begin() { return insts.begin(); }
     InstsType::const_iterator begin() const { return insts.begin(); }
@@ -355,7 +371,7 @@ namespace {
       /// [정보]
       /// 어떤 함수인자가 V에 영향을 미치는지 검사합니다. 이 과정은
       /// 재귀적으로 진행됩니다.
-      void runBottomUp(Value *V)
+      void runBottomUp(Value *V, bool P = true)
       {
         if (Argument *arg = dyn_cast<Argument> (V)) {
           function_dependency->setReturnDependency(arg->getArgNo());
@@ -364,14 +380,14 @@ namespace {
         
         if (Instruction *inst = dyn_cast <Instruction> (V))
         {
-          if (inst_dependency->hasInstructoin(inst))
+          if (inst_dependency->hasInstructoin(inst, P))
             return;
 
 #if IDC_PRINT_INSTRUCTION
           errs() << "    (" << function->getName() << ")" << *inst << "\n";
 #endif
 
-          inst_dependency->addInstruction(inst);
+          inst_dependency->addInstruction(inst, P);
 
           // PHINode와 기타 Instruction은 Operand에 접근하는 방법이 다릅니다.
           // 따라서 두 가지 분리하여 검사하였습니다.
@@ -379,8 +395,8 @@ namespace {
           if (PHINode *phi = dyn_cast<PHINode> (inst)) {
             for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
               Value *target_value = phi->getIncomingValue(i);
-              runBottomUp(target_value);
-              runSearch(target_value);
+              runBottomUp(target_value, P);
+              runSearch(target_value, P);
             }
           } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
             
@@ -391,16 +407,16 @@ namespace {
             // 반환값에 영향을 미치는 모든 함수인자들은 V에 영향을 미치게 됩니다.
             for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
               if (depends->hasReturnDependency(i) == true) {
-                runBottomUp(ci->getOperand(i));
-                runSearch(ci->getOperand(i));
+                runBottomUp(ci->getOperand(i), P);
+                runSearch(ci->getOperand(i), P);
               }
 
           } else {
 
             for (unsigned i = 0; i < inst->getNumOperands(); i++) {
               Value *target_value = inst->getOperand(i);
-              runBottomUp(target_value);
-              runSearch(target_value);
+              runBottomUp(target_value, P);
+              runSearch(target_value, P);
             }
           }
 
@@ -452,14 +468,15 @@ namespace {
       
       void processBlock(BlockNode *BN)
       {
+        bool is_perpect = BN->getFromNodes().size() == 1;
         for (BlockNode *bn : BN->getFromNodes())
         {
           for (BlockNode *x : block_nodes)
             if (x == bn) return;
           block_nodes.push_back(bn);
           if (bn->getBranchInst()->isConditional()) {
-            runBottomUp(bn->getBranchInst()->getCondition());
-            runSearch(bn->getBranchInst()->getCondition());
+            runBottomUp(bn->getBranchInst()->getCondition(), is_perpect);
+            runSearch(bn->getBranchInst()->getCondition(), is_perpect);
           }
           processBlock(bn);
         }
@@ -479,7 +496,7 @@ namespace {
       ///      그 자체가 해당 변수를 담당할 수 있습니다.
       ///   3. CallInst: 찾으려는 변수가 포인터형태의 함수인자로 어떤 함수에 넘겨지는 
       ///      경우 해당 함수의 다른 함수인자들이 이 변수에 영향을 미칠 수 있습니다.
-      void runSearch(Value *V)
+      void runSearch(Value *V, bool P = true)
       {
         for (BasicBlock& basic_block : *function)
           for (Instruction& inst : basic_block) {
@@ -496,7 +513,7 @@ namespace {
                 if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
                   for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
                     if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j))
-                      runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument());
+                      runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument(), P);
             }
           }
         processBranches(V);
@@ -553,13 +570,14 @@ namespace {
       
       void processBlock(Argument *A, BlockNode *BN)
       {
+        bool is_perpect = BN->getFromNodes().size() == 1;
         for (BlockNode *bn : BN->getFromNodes())
         {
           for (BlockNode *x : block_nodes)
             if (x == bn) return;
           block_nodes.push_back(bn);
           if (bn->getBranchInst()->isConditional()) {
-            runChecker(A, bn->getBranchInst()->getCondition());
+            runChecker(A, bn->getBranchInst()->getCondition(), is_perpect);
           }
           processBlock(A, bn);
         }
@@ -571,7 +589,7 @@ namespace {
       ///
       /// [보충]
       /// 
-      void runChecker(Argument *A, Value *V)
+      void runChecker(Argument *A, Value *V, bool P = true)
       {
         if (Argument *arg = dyn_cast<Argument> (V)) {
           function_dependency->getFunctionArgumentDependency(
@@ -594,14 +612,14 @@ namespace {
             if (StoreInst *si = dyn_cast<StoreInst> (&inst))
             {
               if (si->getPointerOperand() == V)
-                runChecker(A, si->getValueOperand());
+                runChecker(A, si->getValueOperand(), P);
               else if (si->getValueOperand() == V)
-                runChecker(A, si->getPointerOperand());
+                runChecker(A, si->getPointerOperand(), P);
             }
             else if (LoadInst *li = dyn_cast<LoadInst> (&inst))
             {
               if (si->getPointerOperand() == V)
-                runChecker(A, li);
+                runChecker(A, li, P);
             }
             else if (CallInst *ci = dyn_cast<CallInst> (&inst))
             {
@@ -611,7 +629,7 @@ namespace {
                 if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
                   for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
                     if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j))
-                      runChecker(A, depends->getFunctionArgumentDependency(j)->getArgument());
+                      runChecker(A, depends->getFunctionArgumentDependency(j)->getArgument(), P);
             }
           }
         
@@ -627,19 +645,19 @@ namespace {
           if (PHINode *phi = dyn_cast<PHINode> (inst)) {
             for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
               Value *target_value = phi->getIncomingValue(i);
-              runChecker(A, target_value);
+              runChecker(A, target_value, P);
             }
           } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
             FunctionDependency *depends;
             if (!(depends = processCallInst(ci))) return;
             for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
               if (depends->hasReturnDependency(i) == true) {
-                runChecker(A, ci->getOperand(i));
+                runChecker(A, ci->getOperand(i), P);
               }
           } else {
             for (unsigned i = 0; i < inst->getNumOperands(); i++) {
               Value *target_value = inst->getOperand(i);
-              runChecker(A,target_value);
+              runChecker(A, target_value, P);
             }
           }
         }
@@ -667,7 +685,7 @@ namespace {
       for (Value *value : V)
       {
         inst_dependency = new InstructionDependency();
-        runSearch(value);
+        runSearch(value, true, true);
         IDM->addDependency(value, inst_dependency);
         inst_dependency = nullptr;
       }
@@ -675,37 +693,37 @@ namespace {
 
   private:
 
-    void runBottomUp(Value *V)
+    void runBottomUp(Value *V, bool P = true)
     {
       if (Instruction *inst = dyn_cast <Instruction> (V))
       {
-        if (inst_dependency->hasInstructoin(inst))
+        if (inst_dependency->hasInstructoin(inst, P))
           return;
         
 #if IDC_PRINT_INSTRUCTION
           errs() << "    (" << function->getName() << ")" << *inst << "\n";
 #endif
 
-        inst_dependency->addInstruction(inst);
+        inst_dependency->addInstruction(inst, P);
 
         if (PHINode *phi = dyn_cast<PHINode> (inst)) {
           for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
             Value *target_value = phi->getIncomingValue(i);
-            runBottomUp(target_value);
-            runSearch(target_value);
+            runBottomUp(target_value, P);
+            runSearch(target_value, P);
           }
         } else if (CallInst *ci = dyn_cast<CallInst> (inst)) {
           FunctionDependency *depends = processCallInst(ci);
           for (size_t i = 0; i < ci->getCalledFunction()->arg_size(); i++)
             if (depends->hasReturnDependency(i) == true) {
-              runBottomUp(ci->getOperand(i));
-              runSearch(ci->getOperand(i));
+              runBottomUp(ci->getOperand(i), P);
+              runSearch(ci->getOperand(i), P);
             }
         } else {
           for (unsigned i = 0; i < inst->getNumOperands(); i++) {
             Value *target_value = inst->getOperand(i);
-            runBottomUp(target_value);
-            runSearch(target_value);
+            runBottomUp(target_value, P);
+            runSearch(target_value, P);
           }
         }
         processBranches(V);
@@ -744,28 +762,29 @@ namespace {
 
     void processBlock(BlockNode *BN)
     {
+      bool is_perpect = BN->getFromNodes().size() == 1;
       for (BlockNode *bn : BN->getFromNodes())
       {
         for (BlockNode *x : block_nodes)
           if (x == bn) return;
         block_nodes.push_back(bn);
         if (bn->getBranchInst()->isConditional()) {
-          runBottomUp(bn->getBranchInst()->getCondition());
-          runSearch(bn->getBranchInst()->getCondition());
+          runBottomUp(bn->getBranchInst()->getCondition(), is_perpect);
+          runSearch(bn->getBranchInst()->getCondition(), is_perpect);
         }
         processBlock(bn);
       }
     }
 
-    void runSearch(Value *V)
+    void runSearch(Value *V, bool P = true, bool ROOT = false)
     {
       for (BasicBlock& basic_block : *function)
         for (Instruction& inst : basic_block) {
           if (StoreInst *si = dyn_cast<StoreInst> (&inst))
           {
             if (si->getPointerOperand() == V) {
-              runBottomUp(si->getValueOperand());
-              runSearch(si->getValueOperand());
+              runBottomUp(si->getValueOperand(), P && ROOT);
+              runSearch(si->getValueOperand(), P && ROOT);
             }
           }
           else if (CallInst *ci = dyn_cast<CallInst> (&inst))
@@ -775,8 +794,8 @@ namespace {
               if (depends->getFunctionArgumentDependency(i)->getArgument() == V)
                 for (size_t j = 0; j < depends->getFunction()->arg_size(); j++)
                   if (depends->getFunctionArgumentDependency(i)->hasArgumentDependency(j)) {
-                    runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument());
-                    runSearch(depends->getFunctionArgumentDependency(j)->getArgument());
+                    runBottomUp(depends->getFunctionArgumentDependency(j)->getArgument(), P && ROOT);
+                    runSearch(depends->getFunctionArgumentDependency(j)->getArgument(), P && ROOT);
                   }
           }
         }
@@ -929,7 +948,7 @@ namespace {
         InstructionDependency *inst_dependency = element.second;
         for (auto inst : *inst_dependency)
         {
-          out() << *inst << "\n";
+          out() << (inst.second ? "(Perpect)" : "(Maybe)") << *inst.first << "\n";
         }
         out() << "\n";
         decreaseTab();
