@@ -1008,6 +1008,7 @@ namespace {
 #if IDC_PRINT_RESULT
       print(&F);
 #endif
+      check(&F);
       return false;
     }
 
@@ -1019,6 +1020,20 @@ namespace {
       printer.printTargetFunctionName();
       printer.printTargetFunctionAnnotatedVariable(function_map[F]);
       printer.printTargetFunctionDependencyInstruction();
+    }
+
+    void check(Function *F)
+    {
+      FunctionDependency *dependency = annotated_map->getDependency(F);
+      InstructionDependencyMap *inst_map = dependency->getInstrctionDependencyMap();
+      for (auto& element : *inst_map)
+      {
+        InstructionDependency *inst_dependency = element.second;
+        for (auto& inst : *inst_dependency)
+        {
+          inst.first->setDependency(true);
+        }
+      }
     }
 
   };
