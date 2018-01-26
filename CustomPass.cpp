@@ -1031,7 +1031,9 @@ namespace {
         InstructionDependency *inst_dependency = element.second;
         for (auto& inst : *inst_dependency)
         {
-          inst.first->setDependency(true);
+          ((Value *)(inst.first))->setDependency();
+          if (inst.second)
+            ((Value *)(inst.second))->setMaybeDependency();
         }
       }
     }
