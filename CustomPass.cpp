@@ -1032,7 +1032,7 @@ namespace {
         for (auto& inst : *inst_dependency)
         {
           ((Value *)(inst.first))->setDependency();
-          if (inst.second)
+          if (!inst.second)
             ((Value *)(inst.second))->setMaybeDependency();
         }
       }
