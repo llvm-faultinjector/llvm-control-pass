@@ -17,7 +17,10 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/LinkAllPasses.h"
 #include <stack>
+
+#define DEBUG_TYPE "dependency-check"
 
 /// Dependency check과정에서 확인된 inst를 콘솔에 
 /// 출력할 지의 여부를 결정합니다.
@@ -991,6 +994,7 @@ namespace {
     InterproceduralDependencyCheckPass()
       : FunctionPass(ID)
     {
+      initializeInterproceduralDependencyCheckPass(*PassRegistry::getPassRegistry());
       dependency_map = new DependencyMap();
       annotated_map = new DependencyMap();
     }
@@ -1032,7 +1036,7 @@ namespace {
         for (auto& inst : *inst_dependency)
         {
           ((Value *)(inst.first))->setDependency();
-          if (!inst.second)
+          if (inst.second)
             ((Value *)(inst.second))->setMaybeDependency();
         }
       }
@@ -1043,4 +1047,13 @@ namespace {
 }
 
 char InterproceduralDependencyCheckPass::ID = 0;
-static RegisterPass<InterproceduralDependencyCheckPass> X("custom", "CustomPass");
+static RegisterPass<InterproceduralDependencyCheckPass> X("dependency", "DependencyPass");
+
+INITIALIZE_PASS_BEGIN(InterproceduralDependencyCheckPass, "dependency",
+  "Dependency Check and Marking Pass", false, false)
+INITIALIZE_PASS_END(InterproceduralDependencyCheckPass, "dependency",
+    "Dependency Check and Marking Pass", false, false)
+
+FunctionPass *llvm::createInterproceduralDependencyCheckPass() {
+  return new InterproceduralDependencyCheckPass();
+}
